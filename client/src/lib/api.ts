@@ -13,42 +13,53 @@ import type {
 } from '@shared/types';
 
 const BASE = '/api';
-const TOKEN_KEY = 'resumeai-token';
+const CSRF_COOKIE = 'ra_csrf';
+const CSRF_HEADER = 'X-CSRF-Token';
 
-export const tokenStore = {
-  get: (): string | null => localStorage.getItem(TOKEN_KEY),
-  set: (token: string): void => localStorage.setItem(TOKEN_KEY, token),
-  clear: (): void => localStorage.removeItem(TOKEN_KEY),
-};
+/**
+ * The session credential is an httpOnly cookie the browser attaches on its
+ * own. There is deliberately no token accessor here: if page scripts could
+ * read the session, so could any injected script.
+ *
+ * The CSRF token is a different thing — it is *meant* to be readable, because
+ * proving we can read our own cookie is what a cross-site request cannot do.
+ */
+function csrfToken(): string {
+  const match = document.cookie.match(new RegExp(`(?:^|; )${CSRF_COOKIE}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
 
 /** Thrown for every non-2xx response, carrying the status for callers to branch on. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Machine-readable discriminator, e.g. EMAIL_NOT_VERIFIED. */
+    readonly code?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
-function authHeaders(): Record<string, string> {
-  const token = tokenStore.get();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { ...authHeaders(), ...(init.headers ?? {}) },
+    // Without this the browser withholds the session cookie entirely.
+    credentials: 'include',
+    headers: { [CSRF_HEADER]: csrfToken(), ...(init.headers ?? {}) },
   });
 
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const body: unknown = isJson ? await res.json().catch(() => ({})) : null;
 
   if (!res.ok) {
-    const message =
-      (body as { error?: string } | null)?.error ?? `Request failed (${res.status})`;
-    // An expired token should not leave the app in a half-authenticated state.
-    if (res.status === 401) tokenStore.clear();
-    throw new ApiError(message, res.status);
+    const detail = body as { error?: string; code?: string } | null;
+    throw new ApiError(
+      detail?.error ?? `Request failed (${res.status})`,
+      res.status,
+      detail?.code,
+    );
   }
 
   return body as T;
@@ -67,12 +78,36 @@ export const api = {
   skills: () => request<{ skills: Skill[]; categories: string[] }>('/skills'),
 
   /* ---- auth ---- */
-  register: (payload: { name: string; email: string; password: string; company?: string }) =>
-    send<AuthResponse>('POST', '/auth/register', payload),
+  /** Returns an acknowledgement, not a session — the address must be confirmed first. */
+  register: (payload: {
+    name: string; email: string; password: string;
+    company?: string; website_url?: string;
+  }) =>
+    send<{ ok: true; message: string }>('POST', '/auth/register', payload),
   login: (payload: { email: string; password: string }) =>
     send<AuthResponse>('POST', '/auth/login', payload),
   google: (credential: string) => send<AuthResponse>('POST', '/auth/google', { credential }),
   me: () => request<{ user: User }>('/auth/me'),
+  logout: () => send<{ ok: true }>('POST', '/auth/logout'),
+  logoutAll: () => send<{ ok: true; revoked: number }>('POST', '/auth/logout-all'),
+  sessions: () =>
+    request<{
+      sessions: {
+        id: string; current: boolean; createdAt: string;
+        lastSeenAt: string; userAgent: string | null; ip: string | null;
+      }[];
+    }>('/auth/sessions'),
+
+  verifyEmail: (token: string) =>
+    send<{ ok: true; message: string }>('POST', '/auth/verify-email', { token }),
+  resendVerification: (email: string) =>
+    send<{ ok: true; message: string }>('POST', '/auth/resend-verification', { email }),
+  forgotPassword: (email: string) =>
+    send<{ ok: true; message: string }>('POST', '/auth/forgot-password', { email }),
+  resetPassword: (token: string, password: string) =>
+    send<{ ok: true; message: string }>('POST', '/auth/reset-password', { token, password }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    send<{ ok: true; revoked: number }>('POST', '/auth/change-password', { currentPassword, newPassword }),
 
   /* ---- roles ---- */
   roles: () => request<{ roles: Role[] }>('/roles'),
@@ -101,7 +136,7 @@ export const api = {
    * <img>/<iframe> at the URL — this returns a blob URL the caller must revoke.
    */
   async fileBlobUrl(id: string): Promise<string> {
-    const res = await fetch(`${BASE}/candidates/${id}/file`, { headers: authHeaders() });
+    const res = await fetch(`${BASE}/candidates/${id}/file`, { credentials: 'include' });
     if (!res.ok) throw new ApiError('Could not load the original file.', res.status);
     return URL.createObjectURL(await res.blob());
   },
@@ -119,9 +154,9 @@ export const api = {
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${BASE}/analyze`);
-
-      const token = tokenStore.get();
-      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      // Cookies are not sent on XHR by default when credentials are involved.
+      xhr.withCredentials = true;
+      xhr.setRequestHeader(CSRF_HEADER, csrfToken());
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -134,10 +169,7 @@ export const api = {
           /* handled below */
         }
         if (xhr.status >= 200 && xhr.status < 300) resolve(body as unknown as AnalyzeResponse);
-        else {
-          if (xhr.status === 401) tokenStore.clear();
-          reject(new ApiError(body.error ?? `Upload failed (${xhr.status})`, xhr.status));
-        }
+        else reject(new ApiError(body.error ?? `Upload failed (${xhr.status})`, xhr.status));
       };
       xhr.onerror = () => reject(new ApiError('Network error during upload.', 0));
       xhr.send(form);

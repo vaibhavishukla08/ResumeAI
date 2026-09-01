@@ -1,0 +1,50 @@
+# Caddy reverse proxy — the recommended front door.
+#
+# Caddy obtains and renews a Let's Encrypt certificate automatically and
+# redirects HTTP to HTTPS by default, which is why it is the shortest path to
+# a correct TLS setup here.
+#
+#   caddy run --config deploy/Caddyfile
+#
+# The app itself binds 127.0.0.1 in production, so this proxy is the only way
+# in. Nothing else on the host should be listening publicly.
+
+resumeai.example.com {
+	encode zstd gzip
+
+	# The built SPA. Hashed asset filenames may be cached hard; index.html
+	# must not be, or a deploy leaves clients on stale JavaScript.
+	root * /srv/resumeai/client/dist
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header /index.html Cache-Control "no-cache"
+
+	# API. X-Forwarded-Proto is what lets the app know the original request
+	# was HTTPS; set TRUST_PROXY=true so Express believes it.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:5174 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# SPA fallback: client-side routes must return index.html, not 404.
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+
+	# The application sets its own security headers; these cover the static
+	# responses Caddy serves directly.
+	header {
+		Strict-Transport-Security "max-age=15552000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/resumeai.log
+		format json
+	}
+}

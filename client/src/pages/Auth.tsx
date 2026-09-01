@@ -4,7 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
 import GoogleButton from '@/components/GoogleButton';
 
-type Mode = 'login' | 'register';
+type Mode = 'login' | 'register' | 'forgot';
 
 interface FieldErrors {
   name?: string;
@@ -29,6 +29,8 @@ export default function Auth() {
   );
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [unverified, setUnverified] = useState<string | null>(null);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [showPassword, setShowPassword] = useState(false);
 
@@ -40,16 +42,41 @@ export default function Auth() {
     confirm: '',
   });
 
+  /**
+   * Honeypot. Never rendered visibly and never focusable, so a person cannot
+   * fill it — but a form-filling bot populates every input it finds. The server
+   * treats a non-empty value as a bot and answers exactly as it would a real
+   * signup, so the script gets no feedback to adapt to.
+   */
+  const [honeypot, setHoneypot] = useState('');
+
   const set = (patch: Partial<typeof form>) => {
     setForm((prev) => ({ ...prev, ...patch }));
     setErrors({});
     setFormError(null);
   };
 
+  async function resendVerification() {
+    if (!unverified) return;
+    setBusy(true);
+    try {
+      const { message } = await api.resendVerification(unverified);
+      setNotice(message);
+      setUnverified(null);
+      setFormError(null);
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : 'Could not resend the link.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const switchMode = (next: Mode) => {
     setMode(next);
     setErrors({});
     setFormError(null);
+    setNotice(null);
+    setUnverified(null);
   };
 
   // Ask the server whether Google sign-in is configured for this deployment.
@@ -76,21 +103,27 @@ export default function Auth() {
     }
   }
 
-  /** Mirror the server's rules so the user gets feedback without a round trip. */
+  /** Mirrors the server's rules so the user gets feedback without a round trip. */
   function validate(): boolean {
     const next: FieldErrors = {};
 
-    if (mode === 'register') {
-      if (form.name.trim().length < 2) next.name = 'Please enter your name.';
-      if (form.password !== form.confirm) next.confirm = 'Passwords do not match.';
-    }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(form.email.trim())) {
       next.email = 'Enter a valid email address.';
     }
-    if (form.password.length < 8) {
-      next.password = 'At least 8 characters.';
-    } else if (/^\d+$/.test(form.password)) {
-      next.password = 'Cannot be only numbers.';
+
+    // A reset request only needs an address.
+    if (mode !== 'forgot') {
+      if (mode === 'register') {
+        if (form.name.trim().length < 2) next.name = 'Please enter your name.';
+        if (form.password !== form.confirm) next.confirm = 'Passwords do not match.';
+        // Only enforced on the way in; an existing password may predate the rule.
+        if (form.password.length < 10) next.password = 'At least 10 characters.';
+      } else if (!form.password) {
+        next.password = 'Enter your password.';
+      }
+      if (form.password && /^\d+$/.test(form.password)) {
+        next.password = 'Cannot be only numbers.';
+      }
     }
 
     setErrors(next);
@@ -103,19 +136,34 @@ export default function Auth() {
 
     setBusy(true);
     setFormError(null);
+    setNotice(null);
+    setUnverified(null);
+
     try {
       if (mode === 'login') {
         await login(form.email.trim(), form.password);
-      } else {
-        await register({
+      } else if (mode === 'register') {
+        // Registration no longer signs you in: the address must be confirmed.
+        setNotice(await register({
           name: form.name.trim(),
           email: form.email.trim(),
           password: form.password,
           company: form.company.trim() || undefined,
-        });
+          website_url: honeypot,
+        }));
+        setForm((prev) => ({ ...prev, password: '', confirm: '' }));
+      } else {
+        const { message } = await api.forgotPassword(form.email.trim());
+        setNotice(message);
       }
     } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+      if (err instanceof ApiError) {
+        setFormError(err.message);
+        // Offer a resend rather than leaving them stuck at a wall.
+        if (err.code === 'EMAIL_NOT_VERIFIED') setUnverified(form.email.trim());
+      } else {
+        setFormError('Something went wrong. Try again.');
+      }
     } finally {
       setBusy(false);
     }
@@ -256,18 +304,20 @@ export default function Auth() {
             <span
               className="absolute top-xs bottom-xs w-[calc(50%-4px)] rounded-lg gradient-surface
                          transition-transform duration-300 ease-smooth"
-              style={{ transform: mode === 'login' ? 'translateX(0)' : 'translateX(100%)' }}
+              style={{ transform: mode === 'register' ? 'translateX(100%)' : 'translateX(0)' }}
               aria-hidden="true"
             />
             {(['login', 'register'] as const).map((m) => (
               <button
                 key={m}
                 role="tab"
-                aria-selected={mode === m}
+                aria-selected={m === 'register' ? mode === 'register' : mode !== 'register'}
                 onClick={() => switchMode(m)}
                 className={`relative z-10 flex-1 py-sm rounded-lg font-body text-body-sm font-semibold
                             transition-colors duration-200 ${
-                              mode === m ? 'text-white' : 'text-on-surface-variant hover:text-on-surface'
+                              (m === 'register' ? mode === 'register' : mode !== 'register')
+                                ? 'text-white'
+                                : 'text-on-surface-variant hover:text-on-surface'
                             }`}
               >
                 {m === 'login' ? 'Sign in' : 'Create account'}
@@ -277,22 +327,52 @@ export default function Auth() {
 
           <div key={mode} className="animate-slide-up">
             <h2 className="font-heading text-headline-lg text-on-surface">
-              {mode === 'login' ? 'Welcome back' : 'Create your workspace'}
+              {mode === 'login' ? 'Welcome back'
+                : mode === 'register' ? 'Create your workspace'
+                : 'Reset your password'}
             </h2>
             <p className="font-body text-body-sm text-on-surface-variant mt-xs mb-lg">
               {mode === 'login'
                 ? 'Sign in to reach your candidate pipeline.'
-                : 'Each account is its own workspace, with its own roles and candidates.'}
+                : mode === 'register'
+                  ? 'Each account is its own workspace, with its own roles and candidates.'
+                  : 'Enter your address and we will send a link to choose a new password.'}
             </p>
 
-            <GoogleButton
-              clientId={googleClientId}
-              onCredential={onGoogleCredential}
-              mode={mode}
-              disabled={busy}
-            />
+            {notice && (
+              <div className="flex items-start gap-sm p-md rounded-xl bg-success/10 border border-success/30 mb-md animate-slide-down">
+                <span className="material-symbols-outlined text-success flex-shrink-0" style={{ fontSize: 19 }}>
+                  mark_email_read
+                </span>
+                <p className="font-body text-body-sm text-on-surface">{notice}</p>
+              </div>
+            )}
+
+            {mode !== 'forgot' && (
+              <GoogleButton
+                clientId={googleClientId}
+                onCredential={onGoogleCredential}
+                mode={mode === 'register' ? 'register' : 'login'}
+                disabled={busy}
+              />
+            )}
 
             <form onSubmit={onSubmit} className="space-y-md mt-md" noValidate>
+              {/* Off-screen rather than display:none — some bots skip hidden
+                  inputs but fill positioned ones. aria-hidden and tabIndex keep
+                  it away from assistive tech and keyboard users alike. */}
+              <div aria-hidden="true" className="absolute -left-[9999px] top-0 h-0 w-0 overflow-hidden">
+                <label htmlFor="website_url">Leave this field empty</label>
+                <input
+                  id="website_url"
+                  name="website_url"
+                  type="text"
+                  tabIndex={-1}
+                  autoComplete="off"
+                  value={honeypot}
+                  onChange={(e) => setHoneypot(e.target.value)}
+                />
+              </div>
               {mode === 'register' && (
                 <>
                   <Field
@@ -326,6 +406,7 @@ export default function Auth() {
                 placeholder="you@company.com"
               />
 
+              {mode !== 'forgot' && (
               <Field
                 label="Password"
                 icon="lock"
@@ -348,6 +429,19 @@ export default function Auth() {
                   </button>
                 }
               />
+              )}
+
+              {mode === 'login' && (
+                <div className="flex justify-end -mt-sm">
+                  <button
+                    type="button"
+                    onClick={() => switchMode('forgot')}
+                    className="font-body text-body-sm text-primary hover:underline"
+                  >
+                    Forgot your password?
+                  </button>
+                </div>
+              )}
 
               {mode === 'register' && (
                 <Field
@@ -367,7 +461,19 @@ export default function Auth() {
                   <span className="material-symbols-outlined text-error flex-shrink-0" style={{ fontSize: 18 }}>
                     error
                   </span>
-                  <p className="font-body text-body-sm text-error">{formError}</p>
+                  <div>
+                    <p className="font-body text-body-sm text-error">{formError}</p>
+                    {unverified && (
+                      <button
+                        type="button"
+                        onClick={resendVerification}
+                        disabled={busy}
+                        className="mt-xs font-body text-body-sm font-semibold text-primary hover:underline"
+                      >
+                        Resend the confirmation link
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -377,11 +483,11 @@ export default function Auth() {
                     <span className="material-symbols-outlined animate-spin" style={{ fontSize: 18 }}>
                       progress_activity
                     </span>
-                    {mode === 'login' ? 'Signing in…' : 'Creating account…'}
+                    {mode === 'login' ? 'Signing in…' : mode === 'register' ? 'Creating account…' : 'Sending…'}
                   </>
                 ) : (
                   <>
-                    {mode === 'login' ? 'Sign in' : 'Create account'}
+                    {mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Send reset link'}
                     <span className="material-symbols-outlined" style={{ fontSize: 18 }}>arrow_forward</span>
                   </>
                 )}
@@ -389,13 +495,21 @@ export default function Auth() {
             </form>
 
             <p className="mt-lg text-center font-body text-body-sm text-on-surface-variant">
-              {mode === 'login' ? "Don't have an account? " : 'Already have one? '}
-              <button
-                onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
-                className="text-primary font-semibold hover:underline"
-              >
-                {mode === 'login' ? 'Create one' : 'Sign in'}
-              </button>
+              {mode === 'forgot' ? (
+                <button onClick={() => switchMode('login')} className="text-primary font-semibold hover:underline">
+                  Back to sign in
+                </button>
+              ) : (
+                <>
+                  {mode === 'login' ? "Don't have an account? " : 'Already have one? '}
+                  <button
+                    onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
+                    className="text-primary font-semibold hover:underline"
+                  >
+                    {mode === 'login' ? 'Create one' : 'Sign in'}
+                  </button>
+                </>
+              )}
             </p>
           </div>
         </div>

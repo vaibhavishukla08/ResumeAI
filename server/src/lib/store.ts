@@ -17,6 +17,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseRequiredSkills } from './skills.js';
 import type { Candidate, Role, RoleInput, StoredUser } from '../../../shared/types.js';
+import type { SessionRecord } from './sessions.js';
 
 const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'data');
 const DB_PATH = path.join(DIR, 'db.json');
@@ -37,6 +38,7 @@ interface Db {
   users: StoredUser[];
   roles: RoleRecord[];
   candidates: Candidate[];
+  sessions: SessionRecord[];
 }
 
 /** Seeded into every new account so the app is usable immediately. */
@@ -100,9 +102,10 @@ async function load(): Promise<Db> {
       users: parsed.users ?? [],
       roles: parsed.roles ?? [],
       candidates: parsed.candidates ?? [],
+      sessions: parsed.sessions ?? [],
     };
   } catch {
-    cache = { users: [], roles: [], candidates: [] };
+    cache = { users: [], roles: [], candidates: [], sessions: [] };
   }
   return cache;
 }
@@ -210,13 +213,35 @@ export async function saveRole(userId: string, input: RoleInput): Promise<Role> 
   return hydrateRole(record);
 }
 
-export async function deleteRole(userId: string, id: string): Promise<boolean> {
+/**
+ * Delete a role and everything screened against it.
+ *
+ * Returns the removed candidates so the caller can unlink their uploads. An
+ * earlier version dropped the records and left the files behind, which both
+ * leaked storage and kept resume PII on disk after the owner believed they had
+ * deleted it.
+ */
+export async function deleteRole(
+  userId: string,
+  id: string,
+): Promise<{ deleted: boolean; removedCandidates: Candidate[] }> {
   const db = await load();
   const before = db.roles.length;
+
   db.roles = db.roles.filter((r) => !(r.userId === userId && r.id === id));
+  const removedCandidates = db.candidates.filter((c) => c.userId === userId && c.roleId === id);
   db.candidates = db.candidates.filter((c) => !(c.userId === userId && c.roleId === id));
+
   await persist();
-  return db.roles.length < before;
+  return { deleted: db.roles.length < before, removedCandidates };
+}
+
+/** Every stored filename still referenced by a candidate record. */
+export async function referencedFiles(): Promise<Set<string>> {
+  const db = await load();
+  return new Set(
+    db.candidates.map((c) => c.file?.storedName).filter((n): n is string => Boolean(n)),
+  );
 }
 
 /* ------------------------------------------------------------- candidates */
@@ -283,6 +308,109 @@ export async function corpusFor(
   return db.candidates
     .filter((c) => c.userId === userId && c.roleId === roleId && c.id !== excludeId && c.text)
     .map((c) => c.text);
+}
+
+/* --------------------------------------------------------------- sessions */
+
+export async function createSession(record: SessionRecord): Promise<SessionRecord> {
+  const db = await load();
+  db.sessions.push(record);
+  await persist();
+  return record;
+}
+
+export async function findSessionByHash(tokenHash: string): Promise<SessionRecord | null> {
+  const db = await load();
+  return db.sessions.find((s) => s.tokenHash === tokenHash) ?? null;
+}
+
+export async function touchSession(sessionId: string): Promise<void> {
+  const db = await load();
+  const session = db.sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+  session.lastSeenAt = new Date().toISOString();
+  await persist();
+}
+
+/**
+ * Delete a session the caller owns.
+ *
+ * `userId` is not optional on purpose. An earlier version keyed only on
+ * `sessionId`, which was safe only because no route happened to accept one
+ * from a client — the obvious next feature ("revoke this device" from the
+ * session list) would have introduced an IDOR the moment someone wrote it.
+ * Requiring the owner makes that mistake impossible to express.
+ */
+export async function deleteSession(userId: string, sessionId: string): Promise<boolean> {
+  const db = await load();
+  const before = db.sessions.length;
+  db.sessions = db.sessions.filter((s) => !(s.id === sessionId && s.userId === userId));
+  const removed = db.sessions.length < before;
+  if (removed) await persist();
+  return removed;
+}
+
+/**
+ * Delete by id alone. Reserved for the session layer, which only ever calls it
+ * with a record it has already resolved from the presented cookie — there is
+ * no user context to check against at that point, and no caller-supplied id.
+ */
+export async function deleteResolvedSession(sessionId: string): Promise<void> {
+  const db = await load();
+  db.sessions = db.sessions.filter((s) => s.id !== sessionId);
+  await persist();
+}
+
+/**
+ * Revoke every session for a user. Called on password change and reset, so a
+ * stolen session dies the moment the owner regains control of the account.
+ */
+export async function deleteSessionsForUser(userId: string, exceptId?: string): Promise<number> {
+  const db = await load();
+  const before = db.sessions.length;
+  db.sessions = db.sessions.filter((s) => s.userId !== userId || s.id === exceptId);
+  await persist();
+  return before - db.sessions.length;
+}
+
+export async function listSessionsForUser(userId: string): Promise<SessionRecord[]> {
+  const db = await load();
+  return db.sessions.filter((s) => s.userId === userId);
+}
+
+/** Drop expired rows so the store does not grow without bound. */
+export async function pruneSessions(isExpired: (s: SessionRecord) => boolean): Promise<number> {
+  const db = await load();
+  const before = db.sessions.length;
+  db.sessions = db.sessions.filter((s) => !isExpired(s));
+  const removed = before - db.sessions.length;
+  if (removed) await persist();
+  return removed;
+}
+
+/* ---------------------------------------------------------- user security */
+
+export async function updateUser(
+  userId: string,
+  patch: Partial<StoredUser>,
+): Promise<StoredUser | null> {
+  const db = await load();
+  const index = db.users.findIndex((u) => u.id === userId);
+  if (index === -1) return null;
+  db.users[index] = { ...db.users[index], ...patch };
+  await persist();
+  return db.users[index];
+}
+
+/** Look a user up by a token digest — never by the raw token. */
+export async function findUserByVerifyHash(hash: string): Promise<StoredUser | null> {
+  const db = await load();
+  return db.users.find((u) => u.verifyTokenHash === hash) ?? null;
+}
+
+export async function findUserByResetHash(hash: string): Promise<StoredUser | null> {
+  const db = await load();
+  return db.users.find((u) => u.resetTokenHash === hash) ?? null;
 }
 
 export function newId(): string {

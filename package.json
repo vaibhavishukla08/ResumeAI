@@ -11,6 +11,8 @@
     "dev:client": "npm run dev --prefix client",
     "build": "npm run build --prefix server && npm run build --prefix client",
     "start": "npm start --prefix server",
-    "typecheck": "npm run typecheck --prefix server && npm run typecheck --prefix client"
+    "typecheck": "npm run typecheck --prefix server && npm run typecheck --prefix client",
+    "scan:secrets": "node deploy/scan-secrets.mjs",
+    "preflight": "node deploy/preflight.mjs"
   }
 }

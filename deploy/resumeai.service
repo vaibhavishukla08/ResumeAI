@@ -1,0 +1,73 @@
+# systemd unit.
+#
+#   sudo cp deploy/resumeai.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now resumeai
+#
+# The hardening directives below are the point of this file. The application
+# handles authentication; systemd handles what the process can reach if that
+# ever fails.
+
+[Unit]
+Description=ResumeAI screening API
+After=network-headless.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=resumeai
+Group=resumeai
+WorkingDirectory=/srv/resumeai
+
+Environment=NODE_ENV=production
+# Secrets come from a root-owned file readable only by this service, not from
+# Environment= lines — those are visible in `systemctl show` and `/proc`.
+EnvironmentFile=/etc/resumeai/resumeai.env
+
+ExecStart=/usr/bin/node server/dist/server/src/index.js
+Restart=always
+RestartSec=5
+
+# ---- filesystem ----------------------------------------------------------
+# Read-only root with a private /tmp. The service can write to exactly two
+# directories and nothing else, so a path-traversal bug has nowhere to land.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/resumeai/server/data /srv/resumeai/server/uploads
+# Every file it creates is owner-only.
+UMask=0077
+
+# ---- privilege -----------------------------------------------------------
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+# Node needs AF_INET; nothing here needs raw sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+# ---- resources -----------------------------------------------------------
+# OCR is memory-hungry; the cap turns a leak into a restart rather than an
+# out-of-memory event that takes the host down.
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=4096
+
+# ---- logging -------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=resumeai
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,8 @@ import type { CandidateStatus, CandidateSummary, HealthResponse, Role, Skill } f
 import Shell from '@/components/Shell';
 import Auth from '@/pages/Auth';
 import Landing from '@/pages/Landing';
+import VerifyEmail from '@/pages/VerifyEmail';
+import ResetPassword from '@/pages/ResetPassword';
 import Dashboard from '@/pages/Dashboard';
 import Candidates from '@/pages/Candidates';
 import CandidateAnalysis from '@/pages/CandidateAnalysis';
@@ -40,6 +42,52 @@ function BootScreen({ message }: { message: string }) {
           </span>
         </div>
         <p className="font-body text-body-sm text-on-surface-variant">{message}</p>
+      </div>
+    </div>
+  );
+}
+
+/** Shown to a signed-in user whose address is still unconfirmed. */
+function VerifyNotice() {
+  const { user, logout, refresh } = useAuth();
+  const { push } = useToast();
+  const [sending, setSending] = useState(false);
+
+  async function resend() {
+    if (!user) return;
+    setSending(true);
+    try {
+      const { message } = await api.resendVerification(user.email);
+      push(message, 'success', 7000);
+    } catch (err) {
+      push((err as Error).message, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-background gradient-mesh grid place-items-center p-lg">
+      <div className="panel p-2xl max-w-md w-full text-center animate-scale-in">
+        <div className="w-14 h-14 mx-auto rounded-2xl bg-surface-container-high grid place-items-center">
+          <span className="material-symbols-outlined text-warning" style={{ fontSize: 28 }}>
+            mark_email_unread
+          </span>
+        </div>
+        <h1 className="font-heading text-headline-md mt-md">Confirm your email</h1>
+        <p className="font-body text-body-sm text-on-surface-variant mt-xs">
+          We sent a link to <span className="text-on-surface font-semibold">{user?.email}</span>.
+          Your workspace opens as soon as you follow it.
+        </p>
+        <div className="flex items-center justify-center gap-sm mt-lg flex-wrap">
+          <button className="btn-primary" onClick={resend} disabled={sending}>
+            {sending ? 'Sending…' : 'Resend link'}
+          </button>
+          <button className="btn-ghost" onClick={refresh}>I have confirmed it</button>
+        </div>
+        <div className="mt-lg pt-md border-t border-outline-variant">
+          <button className="btn-quiet" onClick={() => void logout()}>Sign out</button>
+        </div>
       </div>
     </div>
   );
@@ -141,13 +189,34 @@ export default function App() {
 
   if (booting) return <BootScreen message="Restoring your session…" />;
 
+  // Reachable in either state: an emailed link must work even when the
+  // recipient is already signed in on that browser.
+  const publicRoutes = (
+    <>
+      <Route path="/verify-email" element={<VerifyEmail />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+    </>
+  );
+
   // Signed out: the marketing page is the front door, /signin is the gate.
   if (!user) {
     return (
       <Routes>
+        {publicRoutes}
         <Route path="/signin" element={<Auth />} />
         <Route path="/" element={<Landing />} />
         <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    );
+  }
+
+  // Signed in but unconfirmed: the API refuses data routes, so showing the
+  // dashboard would just render a wall of failed requests.
+  if (!user.emailVerified) {
+    return (
+      <Routes>
+        {publicRoutes}
+        <Route path="*" element={<VerifyNotice />} />
       </Routes>
     );
   }
@@ -168,6 +237,7 @@ export default function App() {
       onSearch={setSearch}
     >
       <Routes>
+        {publicRoutes}
         <Route path="/" element={<Dashboard {...workspace} />} />
         <Route path="/candidates" element={<Candidates {...workspace} />} />
         <Route path="/candidate/:id" element={<CandidateAnalysis {...workspace} />} />

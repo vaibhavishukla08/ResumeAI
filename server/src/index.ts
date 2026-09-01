@@ -13,12 +13,24 @@ import { analyze, cosineSimilarity } from './lib/score.js';
 import { ALL_SKILLS, CATEGORIES, canonical } from './lib/skills.js';
 import * as store from './lib/store.js';
 import * as gemini from './lib/gemini.js';
+import cookieParser from 'cookie-parser';
 import {
+  clearFailedLogins,
+  endSession,
+  fakeVerify,
   googleStatus,
   hashPassword,
+  isLocked,
+  lockRemainingSeconds,
+  needsRehash,
+  normaliseEmail,
   publicUser,
+  recordFailedLogin,
   requireAuth,
-  signToken,
+  requireCsrf,
+  requireVerified,
+  optionalAuth,
+  startSession,
   validateEmail,
   validateName,
   validatePassword,
@@ -26,6 +38,23 @@ import {
   verifyPassword,
   type AuthedRequest,
 } from './lib/auth.js';
+import {
+  ipRateLimit, principalRateLimit, consume, reset as resetLimit,
+  clientIp, describe, principal,
+} from './lib/ratelimit.js';
+import * as abuse from './lib/abuse.js';
+import * as quota from './lib/quota.js';
+import { hashToken, isExpired, issueToken } from './lib/tokens.js';
+import * as mailer from './lib/mailer.js';
+import { clearSessionCookies, ensureCsrfCookie, isSessionExpired } from './lib/sessions.js';
+import * as v from './lib/validate.js';
+import {
+  APP_URL, BIND_HOST, MAX_FILE_MB, PORT, TRUST_PROXY,
+  describe as describeConfig, reportConfig,
+} from './lib/config.js';
+import { closeLogger, log } from './lib/logger.js';
+import { recordAuthEvent, auditSnapshot } from './lib/audit.js';
+import { requestId, requireHttps, securityHeaders, secureDataDirectories } from './lib/hardening.js';
 
 import type {
   AnalyzeFailure,
@@ -40,14 +69,107 @@ import type {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-const PORT = Number(process.env.PORT) || 5174;
-const MAX_FILE_MB = Number(process.env.MAX_FILE_MB) || 12;
+const DATA_DIR = path.join(__dirname, '..', 'data');
 
-await fs.mkdir(UPLOAD_DIR, { recursive: true });
+// Fail fast on bad configuration before anything binds a port.
+reportConfig(log);
+// Owner-only permissions on everything holding hashes, PII or resumes.
+secureDataDirectories({ data: DATA_DIR, uploads: UPLOAD_DIR });
 
 const app = express();
-app.use(cors());
+
+// Rate limiting keys on req.ip; behind a proxy that is the proxy's address
+// unless we trust the forwarding header, which would put every user in one
+// bucket. Only trust it when explicitly told to — trusting it blindly lets a
+// client spoof X-Forwarded-For and evade the limiter entirely.
+if (TRUST_PROXY) {
+  app.set('trust proxy', TRUST_PROXY === 'true' ? 1 : TRUST_PROXY);
+}
+// Never advertise the framework; it only helps someone pick an exploit.
+app.disable('x-powered-by');
+
+app.use(requestId);
+app.use(requireHttps);
+app.use(securityHeaders);
+
+// Credentials must be allowed for cookie auth, and that forbids a wildcard
+// origin — so the allowed origin is explicit.
+app.use(cors({ origin: APP_URL, credentials: true }));
+
+app.use(cookieParser());
 app.use(express.json({ limit: '4mb' }));
+
+/**
+ * Access log. Emitted on response finish so it carries the real status and
+ * duration, and raised to a security line for the status codes that indicate
+ * someone probing rather than someone using the app.
+ */
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    const ms = Date.now() - (req.startedAt ?? Date.now());
+    const meta = {
+      requestId: req.id,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      ms,
+      ip: req.ip,
+    };
+
+    if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 429) {
+      log.security('http.refused', meta);
+    } else if (res.statusCode >= 500) {
+      log.error('http.error', meta);
+    } else if (ms > 5000) {
+      // Slow requests are worth seeing: they are how resource-exhaustion shows up.
+      log.warn('http.slow', meta);
+    } else {
+      log.debug('http', meta);
+    }
+  });
+  next();
+});
+
+// Anonymous callers get a CSRF token so that login itself is protected, then
+// every mutating request must echo it. Registered before the routes so a new
+// endpoint is covered by default rather than by remembering.
+app.use('/api', ensureCsrfCookie, requireCsrf);
+
+/**
+ * Behavioural gate. Runs on every API request and refuses only on patterns no
+ * legitimate client produces — crawlers, id enumeration, bulk record
+ * collection, or a scripted client at machine cadence. Single oddities are
+ * scored and logged, not blocked, because honest integrations look unusual too.
+ */
+app.use('/api', (req, res, next) => {
+  const verdict = abuse.inspect(req);
+
+  // Feed response codes back so 404 streaks on id routes become visible. The
+  // key comes from `inspect` because the principal changes once auth has run.
+  res.on('finish', () => abuse.noteResponse(verdict.key, req, res.statusCode));
+
+  if (verdict.refuse) {
+    res.setHeader('Retry-After', '300');
+    res.status(429).json({ error: verdict.reason });
+    return;
+  }
+  next();
+});
+
+/**
+ * Overall API budget, charged to the account when there is one and the address
+ * otherwise. Generous enough that the dashboard's own burst of calls never
+ * approaches it; low enough that a runaway script is stopped in a minute.
+ */
+app.use('/api', principalRateLimit('api', {
+  max: 600,
+  windowMs: 60_000,
+  blockMs: 60_000,
+  noun: 'the API',
+  onRefusal: (req) => log.security('abuse.api_budget_exhausted', {
+    principal: principal(req), ip: req.ip, path: req.path, requestId: req.id,
+  }),
+}));
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -56,9 +178,24 @@ const upload = multer({
   }),
   limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 60 },
   fileFilter: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (SUPPORTED_EXTENSIONS.includes(ext)) return cb(null, true);
-    cb(new Error(`Unsupported file type "${ext}". Allowed: ${SUPPORTED_EXTENSIONS.join(', ')}`));
+    // Sanitise first: the original name is attacker-controlled and is used to
+    // derive the extension. "resume.pdf\u0000.sh" and "../../x.pdf" both need
+    // to resolve to something harmless before anything is decided from it.
+    const clean = v.safeFilename(file.originalname);
+    const ext = path.extname(clean).toLowerCase();
+
+    if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+      // A ValidationError so the handler answers 400. A plain Error here falls
+      // through to the generic branch and reports a 500, which blames the
+      // server for the client sending an unsupported file.
+      return cb(new v.ValidationError(
+        'resumes',
+        `Unsupported file type "${ext || 'none'}". Allowed: ${SUPPORTED_EXTENSIONS.join(', ')}`,
+      ));
+    }
+    // Carry the cleaned name forward so nothing downstream sees the raw one.
+    file.originalname = clean;
+    cb(null, true);
   },
 });
 
@@ -66,19 +203,65 @@ type Handler = (req: Request, res: Response, next: NextFunction) => unknown;
 const route = (fn: Handler): Handler => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
+/** The only values `status` may take. Referenced by the validator. */
+const CANDIDATE_STATUSES = ['new', 'shortlisted', 'rejected'] as const;
+
 /** Narrow to the guarded request shape inside handlers behind `requireAuth`. */
 const authed = (req: Request): AuthedRequest => req as AuthedRequest;
 
+/** Common fields for every audit line raised from a route. */
+const ctx = (req: Request, extra: Record<string, unknown> = {}) => ({
+  ip: req.ip ?? 'unknown',
+  userAgent: req.headers['user-agent'] ?? null,
+  requestId: req.id,
+  ...extra,
+});
+
 /* ------------------------------------------------------------------ meta */
 
-app.get('/api/health', (_req, res) => {
+/**
+ * Health and capability discovery.
+ *
+ * The Google client ID has to be readable before sign-in — the button cannot
+ * render without it, and Google treats it as public. Everything else is
+ * infrastructure detail: which models are configured, and whether an AI key is
+ * present at all. That is free reconnaissance for an attacker and of no use to
+ * an anonymous visitor, so it is only included once a session is resolved.
+ */
+app.get('/api/health', optionalAuth, (req, res) => {
+  const signedIn = Boolean((req as Partial<AuthedRequest>).user);
+
   res.json({
     ok: true,
-    gemini: gemini.geminiStatus(),
     google: googleStatus(),
     maxFileMb: MAX_FILE_MB,
     supported: SUPPORTED_EXTENSIONS,
+    gemini: signedIn
+      ? gemini.geminiStatus()
+      // Anonymous callers learn nothing about the AI configuration.
+      : { enabled: false, extractModel: '', reasonModel: '', embedModel: '' },
   });
+});
+
+/**
+ * Operational health. Behind auth and admin-only: uptime and detector counts
+ * are useful to an operator and useful to an attacker, so they are not public.
+ */
+app.get('/api/ops/health', requireAuth, requireVerified, (req, res) => {
+  if (authed(req).user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin only.' });
+  }
+  res.json({
+    ok: true,
+    uptimeSeconds: Math.round(process.uptime()),
+    memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    detectors: { ...auditSnapshot(), ...abuse.abuseSnapshot() },
+  });
+});
+
+/** Current analysis budget, so the UI can show it before a large upload. */
+app.get('/api/quota', requireAuth, requireVerified, (req, res) => {
+  res.json({ quota: quota.quotaStatus(authed(req).user.id) });
 });
 
 app.get('/api/skills', (_req, res) => {
@@ -87,53 +270,172 @@ app.get('/api/skills', (_req, res) => {
 
 /* ------------------------------------------------------------------ auth */
 
-app.post('/api/auth/register', route(async (req, res) => {
+/**
+ * Limits are deliberately tighter on the endpoints that reveal or grant
+ * access. `blockMs` is longer than the window so tripping a limit costs real
+ * time rather than resetting immediately.
+ */
+const LOGIN_IP_LIMIT   = { max: 10, windowMs: 15 * 60_000, blockMs: 15 * 60_000 };
+const REGISTER_LIMIT   = { max: 5,  windowMs: 60 * 60_000, blockMs: 60 * 60_000 };
+const RESET_LIMIT      = { max: 5,  windowMs: 60 * 60_000, blockMs: 60 * 60_000 };
+const VERIFY_LIMIT     = { max: 20, windowMs: 60 * 60_000 };
+
+/** Identical response whether or not the address is already taken. */
+const REGISTER_ACCEPTED = {
+  ok: true,
+  message: 'Check your email for a link to confirm your address.',
+};
+
+app.post('/api/auth/register', ipRateLimit('register', REGISTER_LIMIT), route(async (req, res) => {
   const { email, password, name, company } = req.body ?? {};
 
-  for (const check of [validateName(name), validateEmail(email), validatePassword(password)]) {
+  // Hidden field no human can see, let alone fill. Answer exactly as a real
+  // signup does, so the bot cannot tell it failed and retry differently.
+  if (abuse.trippedHoneypot(req.body)) {
+    log.security('abuse.honeypot_tripped', {
+      ip: req.ip, ua: req.headers['user-agent'], requestId: req.id,
+    });
+    return res.status(202).json(REGISTER_ACCEPTED);
+  }
+
+  for (const check of [validateName(name), validateEmail(email)]) {
     if (!check.ok) return res.status(400).json({ error: check.error });
   }
+  // Feed the identity into the strength check so "alex@acme.com" cannot use
+  // "alexacme123" as a password.
+  const strength = validatePassword(password, [String(name ?? ''), String(email ?? '').split('@')[0]]);
+  if (!strength.ok) return res.status(400).json({ error: strength.error });
 
-  if (await store.findUserByEmail(email)) {
-    return res.status(409).json({ error: 'An account with that email already exists.' });
+  const address = normaliseEmail(String(email));
+
+  if (abuse.isDisposableEmail(address)) {
+    return res.status(400).json({
+      error: 'Please use a work email address. Disposable addresses are not accepted.',
+    });
   }
 
+  // "a.b+tag@gmail.com" and "ab@gmail.com" are one mailbox. Collapsing aliases
+  // stops one inbox minting unlimited accounts to farm free analysis quota.
+  const canonical = abuse.canonicalEmail(address);
+  const aliasLimit = consume(`signup:alias:${canonical}`, {
+    max: 3, windowMs: 24 * 60 * 60_000, blockMs: 24 * 60 * 60_000,
+  });
+  if (!aliasLimit.allowed) {
+    log.security('abuse.signup_alias_flood', {
+      canonical: abuse.canonicalEmail(address).split('@')[1],
+      ip: req.ip, requestId: req.id,
+    });
+    // Same shape as success: do not teach the script what tripped.
+    return res.status(202).json(REGISTER_ACCEPTED);
+  }
+
+  const existing = await store.findUserByEmail(address);
+
+  if (existing) {
+    // Do not confirm the address is taken. Tell the real owner by email and
+    // return the same body as a successful signup, so probing yields nothing.
+    mailer.sendDuplicateRegistrationEmail(existing.email, existing.name);
+    recordAuthEvent('register.duplicate', ctx(req, { email: address, userId: existing.id }));
+    return res.status(202).json(REGISTER_ACCEPTED);
+  }
+
+  const verification = issueToken('email_verification');
   const user: StoredUser = {
     id: store.newId(),
-    email: String(email).trim().toLowerCase(),
+    email: address,
     name: String(name).trim(),
-    company: company ? String(company).trim() : null,
+    company: company ? String(company).trim().slice(0, 120) : null,
     // The first account to register owns the deployment.
     role: (await store.countUsers()) === 0 ? 'admin' : 'recruiter',
     provider: 'password',
+    emailVerified: false,
     createdAt: new Date().toISOString(),
     passwordHash: await hashPassword(password),
+    verifyTokenHash: verification.hash,
+    verifyTokenExpiresAt: verification.expiresAt,
+    failedLoginCount: 0,
+    lockedUntil: null,
   };
 
   await store.createUser(user);
-  res.status(201).json({ token: signToken(user), user: publicUser(user) });
+  mailer.sendVerificationEmail(user.email, user.name, verification.raw);
+  recordAuthEvent('register.new', ctx(req, { email: user.email, userId: user.id }));
+
+  // No session yet: signing in is gated on confirming the address.
+  res.status(202).json(REGISTER_ACCEPTED);
 }));
 
-app.post('/api/auth/login', route(async (req, res) => {
+app.post('/api/auth/login', ipRateLimit('login', LOGIN_IP_LIMIT), route(async (req, res) => {
   const { email, password } = req.body ?? {};
   if (typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
 
-  const user = await store.findUserByEmail(email);
-  // Same message either way, so this cannot be used to enumerate accounts.
+  const address = normaliseEmail(email);
+  const user = await store.findUserByEmail(address);
   const invalid = { error: 'Email or password is incorrect.' };
-  if (!user) return res.status(401).json(invalid);
 
-  // A Google account has no local password; say so rather than failing opaquely.
-  if (!user.passwordHash) {
-    return res.status(409).json({
-      error: 'This account was created with Google. Use "Continue with Google" to sign in.',
+  // Per-account limit, so rotating IPs against one inbox still gets throttled.
+  const accountKey = `account:login:${address}`;
+  const accountLimit = consume(accountKey, { max: 10, windowMs: 15 * 60_000, blockMs: 15 * 60_000 });
+  if (!accountLimit.allowed) {
+    recordAuthEvent('ratelimit.tripped', ctx(req, { email: address, detail: 'per-account login limit' }));
+    return res.status(429).json({
+      error: `Too many attempts. Try again in ${describe(accountLimit.retryAfter)}.`,
     });
   }
-  if (!(await verifyPassword(password, user.passwordHash))) return res.status(401).json(invalid);
 
-  res.json({ token: signToken(user), user: publicUser(user) });
+  if (!user) {
+    // Spend the same time bcrypt would, so a missing account is indistinguishable.
+    await fakeVerify(password);
+    recordAuthEvent('login.failure', ctx(req, { email: address, detail: 'no such account' }));
+    return res.status(401).json(invalid);
+  }
+
+  if (isLocked(user)) {
+    recordAuthEvent('login.locked', ctx(req, { email: address, userId: user.id }));
+    return res.status(429).json({
+      error: `Account temporarily locked after repeated failures. Try again in ${describe(lockRemainingSeconds(user))}.`,
+    });
+  }
+
+  if (!user.passwordHash) {
+    await fakeVerify(password);
+    recordAuthEvent('login.failure', ctx(req, { email: address, userId: user.id, detail: 'google-only account' }));
+    // Same status and shape as a bad password; the hint is safe because it is
+    // only reachable once the correct address is already known to the caller.
+    return res.status(401).json({
+      error: 'Email or password is incorrect.',
+      hint: 'GOOGLE_ACCOUNT',
+    });
+  }
+
+  if (!(await verifyPassword(password, user.passwordHash))) {
+    await recordFailedLogin(user);
+    recordAuthEvent('login.failure', ctx(req, { email: address, userId: user.id, detail: 'wrong password' }));
+    return res.status(401).json(invalid);
+  }
+
+  if (!user.emailVerified) {
+    recordAuthEvent('login.unverified', ctx(req, { email: address, userId: user.id }));
+    return res.status(403).json({
+      error: 'Confirm your email address before signing in. Check your inbox for the link.',
+      code: 'EMAIL_NOT_VERIFIED',
+    });
+  }
+
+  // Upgrade a hash made with fewer rounds, now that we hold the plaintext.
+  if (needsRehash(user.passwordHash)) {
+    await store.updateUser(user.id, { passwordHash: await hashPassword(password) });
+  }
+
+  await clearFailedLogins(user);
+  resetLimit(accountKey);
+  resetLimit(`ip:login:${clientIp(req)}`);
+
+  await startSession(res, user, req);
+  recordAuthEvent('login.success', ctx(req, { email: user.email, userId: user.id }));
+  res.json({ user: publicUser(user) });
 }));
 
 /**
@@ -141,7 +443,7 @@ app.post('/api/auth/login', route(async (req, res) => {
  * Services and posts it here; we verify it against Google's keys, then either
  * link it to the existing account with that email or create a new workspace.
  */
-app.post('/api/auth/google', route(async (req, res) => {
+app.post('/api/auth/google', ipRateLimit('google', LOGIN_IP_LIMIT), route(async (req, res) => {
   const credential = req.body?.credential;
   if (typeof credential !== 'string' || !credential) {
     return res.status(400).json({ error: 'Missing Google credential.' });
@@ -155,12 +457,22 @@ app.post('/api/auth/google', route(async (req, res) => {
   }
 
   const existing = await store.findUserByEmail(profile.email);
+
   if (existing) {
-    // Someone who registered with a password can also sign in with Google on
-    // the same verified email — link the identity rather than blocking them.
-    const linked = await store.linkGoogle(existing.id, profile.googleId, profile.picture);
-    const user = linked ?? existing;
-    return res.json({ token: signToken(user), user: publicUser(user) });
+    await store.linkGoogle(existing.id, profile.googleId, profile.picture);
+    // Google has already proved ownership of this address, so an account that
+    // signed up by password and never confirmed is verified by this.
+    if (!existing.emailVerified) {
+      await store.updateUser(existing.id, {
+        emailVerified: true,
+        verifyTokenHash: null,
+        verifyTokenExpiresAt: null,
+      });
+    }
+    const fresh = (await store.findUserById(existing.id)) ?? existing;
+    await startSession(res, fresh, req);
+    recordAuthEvent('login.google', ctx(req, { email: fresh.email, userId: fresh.id, detail: 'linked existing account' }));
+    return res.json({ user: publicUser(fresh) });
   }
 
   const user: StoredUser = {
@@ -171,44 +483,293 @@ app.post('/api/auth/google', route(async (req, res) => {
     role: (await store.countUsers()) === 0 ? 'admin' : 'recruiter',
     provider: 'google',
     picture: profile.picture,
+    // Google asserted email_verified, checked in verifyGoogleToken.
+    emailVerified: true,
     createdAt: new Date().toISOString(),
     googleId: profile.googleId,
   };
 
   await store.createUser(user);
-  res.status(201).json({ token: signToken(user), user: publicUser(user) });
+  await startSession(res, user, req);
+  recordAuthEvent('login.google', ctx(req, { email: user.email, userId: user.id, detail: 'new account' }));
+  res.status(201).json({ user: publicUser(user) });
 }));
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(authed(req).user) });
 });
 
+app.post('/api/auth/logout', requireAuth, route(async (req, res) => {
+  const { user, sessionId } = authed(req);
+  await endSession(res, { userId: user.id, sessionId });
+  recordAuthEvent('logout', ctx(req, { email: user.email, userId: user.id }));
+  res.json({ ok: true });
+}));
+
+/** Sign out everywhere — the control you want after losing a laptop. */
+app.post('/api/auth/logout-all', requireAuth, route(async (req, res) => {
+  const user = authed(req).user;
+  const revoked = await store.deleteSessionsForUser(user.id);
+  await endSession(res);
+  recordAuthEvent('logout.all', ctx(req, { email: user.email, userId: user.id, detail: `${revoked} revoked` }));
+  res.json({ ok: true, revoked });
+}));
+
+/** Active sessions, so a user can see whether anyone else is signed in. */
+app.get('/api/auth/sessions', requireAuth, route(async (req, res) => {
+  const { user, sessionId } = authed(req);
+  const list = await store.listSessionsForUser(user.id);
+  res.json({
+    sessions: list
+      .filter((s) => !isSessionExpired(s))
+      .map((s) => ({
+        id: s.id,
+        current: s.id === sessionId,
+        createdAt: s.createdAt,
+        lastSeenAt: s.lastSeenAt,
+        userAgent: s.userAgent,
+        // Never echo the token hash; it is a credential verifier.
+        ip: s.ip,
+      })),
+  });
+}));
+
+/**
+ * Revoke one session by id — "sign out that other device".
+ *
+ * The id comes from the client, which is exactly the shape an IDOR takes, so
+ * the store call is scoped to the owner and a foreign id simply matches
+ * nothing. The 404 is deliberate: confirming that a session id exists but
+ * belongs to somebody else would itself be a small leak.
+ */
+app.delete('/api/auth/sessions/:id', requireAuth, route(async (req, res) => {
+  const { user, sessionId } = authed(req);
+  const removed = await store.deleteSession(user.id, v.id(req.params.id, 'sessionId'));
+  if (!removed) return res.status(404).json({ error: 'Session not found.' });
+  recordAuthEvent('session.revoked', ctx(req, { email: user.email, userId: user.id }));
+
+  // Revoking the session you are holding is just a logout.
+  if (req.params.id === sessionId) clearSessionCookies(res);
+  res.json({ ok: true, wasCurrent: req.params.id === sessionId });
+}));
+
+/* ------------------------------------------------------ email verification */
+
+app.post('/api/auth/verify-email', ipRateLimit('verify', VERIFY_LIMIT), route(async (req, res) => {
+  const token = req.body?.token;
+  if (typeof token !== 'string' || !token) {
+    return res.status(400).json({ error: 'Missing verification token.' });
+  }
+
+  // Look up by digest — the raw token is never stored, so it cannot leak.
+  const user = await store.findUserByVerifyHash(hashToken(token));
+  const invalid = { error: 'That verification link is invalid or has already been used.' };
+  if (!user || !user.verifyTokenExpiresAt) {
+    recordAuthEvent('verify.failure', ctx(req, { detail: 'unknown token' }));
+    return res.status(400).json(invalid);
+  }
+
+  if (isExpired(user.verifyTokenExpiresAt)) {
+    return res.status(410).json({
+      error: 'That verification link has expired. Sign in to request a new one.',
+      code: 'VERIFICATION_EXPIRED',
+    });
+  }
+
+  // Single use: clear the token as it is consumed.
+  await store.updateUser(user.id, {
+    emailVerified: true,
+    verifyTokenHash: null,
+    verifyTokenExpiresAt: null,
+  });
+
+  recordAuthEvent('verify.success', ctx(req, { email: user.email, userId: user.id }));
+  res.json({ ok: true, message: 'Email confirmed. You can sign in now.' });
+}));
+
+/**
+ * Resend takes the address rather than a session, because an unverified user
+ * cannot sign in to ask. Response is identical regardless of whether the
+ * address exists or is already confirmed.
+ */
+app.post('/api/auth/resend-verification', ipRateLimit('resend', RESET_LIMIT), route(async (req, res) => {
+  const accepted = {
+    ok: true,
+    message: 'If that address needs confirming, a new link is on its way.',
+  };
+
+  const email = req.body?.email;
+  if (typeof email !== 'string' || !validateEmail(email).ok) return res.json(accepted);
+
+  const user = await store.findUserByEmail(normaliseEmail(email));
+  if (user && !user.emailVerified) {
+    const verification = issueToken('email_verification');
+    await store.updateUser(user.id, {
+      verifyTokenHash: verification.hash,
+      verifyTokenExpiresAt: verification.expiresAt,
+    });
+    mailer.sendVerificationEmail(user.email, user.name, verification.raw);
+  }
+
+  res.json(accepted);
+}));
+
+/* -------------------------------------------------------- password reset */
+
+app.post('/api/auth/forgot-password', ipRateLimit('forgot', RESET_LIMIT), route(async (req, res) => {
+  // Always the same answer: revealing which addresses have accounts turns this
+  // endpoint into a membership oracle.
+  const accepted = {
+    ok: true,
+    message: 'If an account exists for that address, a reset link is on its way.',
+  };
+
+  const email = req.body?.email;
+  if (typeof email !== 'string' || !validateEmail(email).ok) return res.json(accepted);
+
+  const user = await store.findUserByEmail(normaliseEmail(email));
+  if (user?.passwordHash) {
+    const reset = issueToken('password_reset');
+    await store.updateUser(user.id, {
+      resetTokenHash: reset.hash,
+      resetTokenExpiresAt: reset.expiresAt,
+    });
+    mailer.sendPasswordResetEmail(user.email, user.name, reset.raw);
+    recordAuthEvent('reset.requested', ctx(req, { email: user.email, userId: user.id }));
+  }
+
+  res.json(accepted);
+}));
+
+app.post('/api/auth/reset-password', ipRateLimit('reset', RESET_LIMIT), route(async (req, res) => {
+  const { token, password } = req.body ?? {};
+  if (typeof token !== 'string' || !token) {
+    return res.status(400).json({ error: 'Missing reset token.' });
+  }
+
+  const user = await store.findUserByResetHash(hashToken(token));
+  const invalid = { error: 'That reset link is invalid or has already been used.' };
+  if (!user || !user.resetTokenExpiresAt) {
+    recordAuthEvent('reset.failure', ctx(req, { detail: 'unknown token' }));
+    return res.status(400).json(invalid);
+  }
+
+  if (isExpired(user.resetTokenExpiresAt)) {
+    return res.status(410).json({
+      error: 'That reset link has expired. Request a new one.',
+      code: 'RESET_EXPIRED',
+    });
+  }
+
+  const strength = validatePassword(password, [user.name, user.email.split('@')[0]]);
+  if (!strength.ok) return res.status(400).json({ error: strength.error });
+
+  await store.updateUser(user.id, {
+    passwordHash: await hashPassword(password),
+    // Consume the token, clear any lockout, and confirm the address: holding
+    // the emailed link already proves control of the inbox.
+    resetTokenHash: null,
+    resetTokenExpiresAt: null,
+    emailVerified: true,
+    verifyTokenHash: null,
+    verifyTokenExpiresAt: null,
+    failedLoginCount: 0,
+    lockedUntil: null,
+    passwordChangedAt: new Date().toISOString(),
+  });
+
+  // Whoever forced the reset must not keep an old session alive.
+  await store.deleteSessionsForUser(user.id);
+  mailer.sendPasswordChangedEmail(user.email, user.name);
+  recordAuthEvent('reset.completed', ctx(req, { email: user.email, userId: user.id }));
+
+  res.json({ ok: true, message: 'Password updated. Sign in with your new password.' });
+}));
+
+app.post('/api/auth/change-password', requireAuth,
+  principalRateLimit('changepw', { max: 5, windowMs: 15 * 60_000, noun: 'password changes' }), route(async (req, res) => {
+  const { user, sessionId } = authed(req);
+  const { currentPassword, newPassword } = req.body ?? {};
+
+  if (!user.passwordHash) {
+    return res.status(409).json({
+      error: 'This account signs in with Google and has no password to change.',
+    });
+  }
+  if (typeof currentPassword !== 'string' || !(await verifyPassword(currentPassword, user.passwordHash))) {
+    return res.status(401).json({ error: 'Your current password is incorrect.' });
+  }
+
+  const strength = validatePassword(newPassword, [user.name, user.email.split('@')[0]]);
+  if (!strength.ok) return res.status(400).json({ error: strength.error });
+
+  await store.updateUser(user.id, {
+    passwordHash: await hashPassword(newPassword),
+    passwordChangedAt: new Date().toISOString(),
+  });
+
+  // Keep this session, drop the rest: changing a password should evict anyone
+  // else without logging the user out of the device they are holding.
+  const revoked = await store.deleteSessionsForUser(user.id, sessionId);
+  mailer.sendPasswordChangedEmail(user.email, user.name);
+  recordAuthEvent('password.changed', ctx(req, { email: user.email, userId: user.id, detail: `${revoked} other session(s) revoked` }));
+
+  res.json({ ok: true, revoked });
+}));
+
 /* ----------------------------------------------------------------- roles */
 
-app.get('/api/roles', requireAuth, route(async (req, res) => {
+app.get('/api/roles', requireAuth, requireVerified, route(async (req, res) => {
   res.json({ roles: await store.listRoles(authed(req).user.id) });
 }));
 
-app.post('/api/roles', requireAuth, route(async (req, res) => {
-  const { title, required } = req.body ?? {};
-  if (typeof title !== 'string' || !title.trim()) {
-    return res.status(400).json({ error: 'A role title is required.' });
-  }
-  if (typeof required !== 'string' || !required.trim()) {
+app.post('/api/roles', requireAuth, requireVerified, route(async (req, res) => {
+  const body = req.body ?? {};
+
+  // Build the input explicitly rather than spreading the body. Spreading lets
+  // any key the client invents ride along into storage; naming each field is
+  // what keeps the record shape a decision rather than an accident.
+  const input = {
+    id: v.optionalId(body.id, 'id'),
+    title: v.str(body.title, 'title', { min: 2, max: 120 }),
+    department: v.str(body.department, 'department', { max: 80, optional: true }),
+    description: v.text(body.description, 'description', 20_000),
+    required: v.text(body.required, 'required', 4_000, false),
+    minYears: v.int(body.minYears, 'minYears', { min: 0, max: 60, optional: true }) ?? 0,
+    maxYears: v.int(body.maxYears, 'maxYears', { min: 0, max: 60, optional: true }),
+    mustHave: v.stringArray(body.mustHave, 'mustHave', 60, 60)
+      .map((m) => canonical(m)?.id ?? m)
+      .filter(Boolean),
+  };
+
+  if (!input.required.trim()) {
     return res.status(400).json({ error: 'At least one required skill is needed.' });
   }
+  if (input.maxYears !== null && input.maxYears < input.minYears) {
+    return res.status(400).json({ error: 'Maximum years cannot be below the minimum.' });
+  }
 
-  const mustHave = Array.isArray(req.body.mustHave)
-    ? (req.body.mustHave as string[]).map((m) => canonical(m)?.id ?? m).filter(Boolean)
-    : [];
-
-  const role = await store.saveRole(authed(req).user.id, { ...req.body, title, required, mustHave });
+  const role = await store.saveRole(authed(req).user.id, input);
   res.json({ role });
 }));
 
-app.delete('/api/roles/:id', requireAuth, route(async (req, res) => {
-  const ok = await store.deleteRole(authed(req).user.id, req.params.id);
-  res.status(ok ? 200 : 404).json({ ok });
+app.delete('/api/roles/:id', requireAuth, requireVerified, route(async (req, res) => {
+  const { deleted, removedCandidates } = await store.deleteRole(authed(req).user.id, v.id(req.params.id, 'roleId'));
+
+  // Delete the resumes too. Leaving them would keep candidate PII on disk after
+  // the owner believes it is gone, and grow storage without bound.
+  for (const candidate of removedCandidates) {
+    if (candidate.file?.storedName) {
+      await fs.unlink(path.join(UPLOAD_DIR, candidate.file.storedName)).catch(() => {});
+    }
+  }
+  if (removedCandidates.length) {
+    log.info('role deleted with candidates', {
+      roleId: req.params.id, candidates: removedCandidates.length, requestId: req.id,
+    });
+  }
+
+  res.status(deleted ? 200 : 404).json({ ok: deleted, removedCandidates: removedCandidates.length });
 }));
 
 /* ------------------------------------------------------------ candidates */
@@ -295,21 +856,90 @@ async function buildCandidate(opts: {
   };
 }
 
-app.post('/api/analyze', requireAuth, upload.array('resumes', 60), route(async (req, res) => {
+/**
+ * Analysis budget, charged per resume rather than per request. A request-based
+ * limit is meaningless here: one call with sixty files is sixty extractions and
+ * up to a hundred and twenty model calls.
+ */
+const analysisRateLimit = principalRateLimit('analyze', {
+  max: 200,
+  windowMs: 60 * 60_000,
+  blockMs: 10 * 60_000,
+  noun: 'resume analysis',
+  cost: (req) => ((req.files as Express.Multer.File[] | undefined)?.length ?? 1),
+  onRefusal: (req, result) => log.security('abuse.analysis_budget_exhausted', {
+    principal: principal(req), ip: req.ip, requestedCost: result.cost, requestId: req.id,
+  }),
+});
+
+app.post('/api/analyze', requireAuth, requireVerified, upload.array('resumes', 60),
+  analysisRateLimit,
+  route(async (req, res) => {
   const userId = authed(req).user.id;
-  const roleId = String(req.body.roleId ?? '');
+  const roleId = v.id(req.body.roleId, 'roleId');
   const role = await store.findRole(userId, roleId);
   if (!role) return res.status(400).json({ error: `Unknown role "${roleId}".` });
 
   const files = (req.files as Express.Multer.File[] | undefined) ?? [];
   if (!files.length) return res.status(400).json({ error: 'No files were uploaded.' });
 
+  // Per-file size is capped by multer, but sixty files at the limit is still
+  // 720 MB of disk and parsing work from one request.
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  const MAX_BATCH_BYTES = MAX_FILE_MB * 1024 * 1024 * 8;
+  if (totalBytes > MAX_BATCH_BYTES) {
+    for (const file of files) await fs.unlink(file.path).catch(() => {});
+    return res.status(413).json({
+      error: `Batch is ${Math.round(totalBytes / 1024 / 1024)} MB; the limit is ${Math.round(MAX_BATCH_BYTES / 1024 / 1024)} MB per upload.`,
+    });
+  }
+
+  // Quota is checked before any work starts, and all-or-nothing: a partially
+  // analysed batch leaves the user guessing which resumes were processed.
+  const verdict = quota.checkAnalysisQuota(userId, files.length);
+  if (!verdict.allowed) {
+    // Uploaded bytes are already on disk; drop them rather than accumulating
+    // files for work that will never happen.
+    for (const file of files) await fs.unlink(file.path).catch(() => {});
+
+    log.security('abuse.quota_refused', {
+      userId, batchSize: files.length, reason: verdict.reason, requestId: req.id,
+    });
+    if (verdict.retryAfter) res.setHeader('Retry-After', String(verdict.retryAfter));
+    return res.status(429).json({
+      error: verdict.reason,
+      remainingToday: verdict.remainingToday,
+      remainingThisHour: verdict.remainingThisHour,
+      retryAfter: verdict.retryAfter,
+    });
+  }
+
+  quota.beginAnalysis(userId);
+  try {
   const corpus = await store.corpusFor(userId, role.id);
   const candidates: CandidateSummary[] = [];
   const failures: AnalyzeFailure[] = [];
 
   for (const file of files) {
     try {
+      // The extension is a claim by the uploader; the leading bytes are a fact
+      // about the file. Checking them is what stops a script named .pdf from
+      // reaching the PDF parser, or HTML named .png from reaching OCR.
+      const handle = await fs.open(file.path, 'r');
+      const head = Buffer.alloc(16);
+      await handle.read(head, 0, 16, 0).finally(() => handle.close());
+
+      const ext = path.extname(file.originalname).toLowerCase();
+      const signature = v.checkFileSignature(ext, head);
+      if (!signature.ok) {
+        log.security('upload.signature_mismatch', {
+          userId, file: file.originalname, ext, reason: signature.reason, requestId: req.id,
+        });
+        failures.push({ name: file.originalname, reason: signature.reason ?? 'Unrecognised file contents.' });
+        await fs.unlink(file.path).catch(() => {});
+        continue;
+      }
+
       let extraction = await extractText(file.path, file.originalname);
       let text = extraction.text;
 
@@ -357,32 +987,63 @@ app.post('/api/analyze', requireAuth, upload.array('resumes', 60), route(async (
     }
   }
 
-  res.json({ analyzed: candidates.length, failed: failures.length, candidates, failures });
+  // Charge only for resumes actually analysed: a file rejected during
+  // extraction cost no model calls and should not consume budget.
+  quota.recordAnalysed(userId, candidates.length);
+
+  const remaining = quota.quotaStatus(userId);
+  res.json({
+    analyzed: candidates.length,
+    failed: failures.length,
+    candidates,
+    failures,
+    quota: {
+      usedToday: remaining.usedToday,
+      dailyLimit: remaining.dailyLimit,
+      remainingToday: Math.max(0, remaining.dailyLimit - remaining.usedToday),
+    },
+  });
+  } finally {
+    // Must run even on an exception, or a crashed batch permanently consumes
+    // one of the account's concurrency slots.
+    quota.finishAnalysis(userId);
+  }
 }));
 
-app.get('/api/candidates', requireAuth, route(async (req, res) => {
-  const roleId = typeof req.query.roleId === 'string' ? req.query.roleId : undefined;
+app.get('/api/candidates', requireAuth, requireVerified,
+  principalRateLimit('list', { max: 120, windowMs: 60_000, noun: 'candidate listing' }), route(async (req, res) => {
+  const roleId = v.optionalId(req.query.roleId, 'roleId');
   const list = await store.listCandidates(authed(req).user.id, roleId);
   res.json({ candidates: list.map(slim) });
 }));
 
-app.get('/api/candidates/:id', requireAuth, route(async (req, res) => {
-  const candidate = await store.findCandidate(authed(req).user.id, req.params.id);
+app.get('/api/candidates/:id', requireAuth, requireVerified, route(async (req, res) => {
+  const candidate = await store.findCandidate(authed(req).user.id, v.id(req.params.id, 'id'));
   if (!candidate) return res.status(404).json({ error: 'Candidate not found.' });
   res.json({ candidate });
 }));
 
-app.patch('/api/candidates/:id', requireAuth, route(async (req, res) => {
+app.patch('/api/candidates/:id', requireAuth, requireVerified, route(async (req, res) => {
   const patch: Partial<Candidate> = {};
-  if (typeof req.body?.status === 'string') patch.status = req.body.status as Candidate['status'];
-  if (typeof req.body?.note === 'string') patch.note = req.body.note;
 
-  const updated = await store.updateCandidate(authed(req).user.id, req.params.id, patch);
+  // The previous version cast an arbitrary string to the status type, so any
+  // value at all — including markup — landed in the data model.
+  if (req.body?.status !== undefined) {
+    patch.status = v.oneOf(req.body.status, 'status', CANDIDATE_STATUSES);
+  }
+  if (req.body?.note !== undefined) {
+    patch.note = v.text(req.body.note, 'note', 5_000);
+  }
+  if (!Object.keys(patch).length) {
+    return res.status(400).json({ error: 'Nothing to update. Provide a status or a note.' });
+  }
+
+  const updated = await store.updateCandidate(authed(req).user.id, v.id(req.params.id, 'id'), patch);
   if (!updated) return res.status(404).json({ error: 'Candidate not found.' });
   res.json({ candidate: slim(updated) });
 }));
 
-app.delete('/api/candidates/:id', requireAuth, route(async (req, res) => {
+app.delete('/api/candidates/:id', requireAuth, requireVerified, route(async (req, res) => {
   const userId = authed(req).user.id;
   const candidate = await store.findCandidate(userId, req.params.id);
   if (candidate?.file?.storedName) {
@@ -392,8 +1053,8 @@ app.delete('/api/candidates/:id', requireAuth, route(async (req, res) => {
   res.status(ok ? 200 : 404).json({ ok });
 }));
 
-app.post('/api/candidates/clear', requireAuth, route(async (req, res) => {
-  const roleId = typeof req.body?.roleId === 'string' ? req.body.roleId : undefined;
+app.post('/api/candidates/clear', requireAuth, requireVerified, route(async (req, res) => {
+  const roleId = v.optionalId(req.body?.roleId, 'roleId');
   const removed = await store.clearCandidates(authed(req).user.id, roleId);
 
   // Delete the stored files too, or the uploads directory grows forever.
@@ -406,11 +1067,22 @@ app.post('/api/candidates/clear', requireAuth, route(async (req, res) => {
 }));
 
 /** Serve the original file back for the document preview pane. */
-app.get('/api/candidates/:id/file', requireAuth, route(async (req, res) => {
+app.get('/api/candidates/:id/file', requireAuth, requireVerified,
+  principalRateLimit('file', { max: 100, windowMs: 60_000, noun: 'document downloads' }), route(async (req, res) => {
   const candidate = await store.findCandidate(authed(req).user.id, req.params.id);
   if (!candidate?.file?.storedName) return res.status(404).json({ error: 'No file on record.' });
 
-  const filePath = path.join(UPLOAD_DIR, candidate.file.storedName);
+  // `storedName` is server-generated (uuid + extension) and never user input,
+  // so this cannot traverse today. The check is here so it still cannot if a
+  // future import path, migration or tampered datastore ever puts a relative
+  // segment in that field — the ownership check above would pass, and this is
+  // the only thing standing between that and serving an arbitrary file.
+  const filePath = path.resolve(UPLOAD_DIR, candidate.file.storedName);
+  if (filePath !== path.normalize(filePath) || !filePath.startsWith(UPLOAD_DIR + path.sep)) {
+    console.error(`[security] blocked path escape for candidate ${candidate.id}: ${candidate.file.storedName}`);
+    return res.status(400).json({ error: 'Stored file path is not valid.' });
+  }
+
   try {
     await fs.access(filePath);
   } catch {
@@ -429,12 +1101,26 @@ app.get('/api/candidates/:id/file', requireAuth, route(async (req, res) => {
  * Re-score every candidate on a role. Needed after requirements change, since
  * ranking is relative to the requirement set.
  */
-app.post('/api/roles/:id/rescore', requireAuth, route(async (req, res) => {
+app.post('/api/roles/:id/rescore', requireAuth, requireVerified,
+  principalRateLimit('rescore', {
+    max: 6, windowMs: 60 * 60_000, blockMs: 15 * 60_000, noun: 're-scoring',
+  }),
+  route(async (req, res) => {
   const userId = authed(req).user.id;
   const role = await store.findRole(userId, req.params.id);
   if (!role) return res.status(404).json({ error: 'Role not found.' });
 
   const candidates = await store.listCandidates(userId, role.id);
+
+  // Re-scoring re-runs the model over every candidate on the role, so it draws
+  // on the same budget an upload of that size would.
+  const rescoreQuota = quota.checkAnalysisQuota(userId, candidates.length);
+  if (!rescoreQuota.allowed) {
+    if (rescoreQuota.retryAfter) res.setHeader('Retry-After', String(rescoreQuota.retryAfter));
+    return res.status(429).json({ error: rescoreQuota.reason, retryAfter: rescoreQuota.retryAfter });
+  }
+  quota.beginAnalysis(userId);
+  try {
   let updated = 0;
 
   for (const existing of candidates) {
@@ -459,19 +1145,24 @@ app.post('/api/roles/:id/rescore', requireAuth, route(async (req, res) => {
     updated += 1;
   }
 
+  quota.recordAnalysed(userId, updated);
   res.json({ ok: true, updated });
+  } finally {
+    quota.finishAnalysis(userId);
+  }
 }));
 
 /** Head-to-head comparison across a candidate set. */
-app.post('/api/compare', requireAuth, route(async (req, res) => {
+app.post('/api/compare', requireAuth, requireVerified,
+  principalRateLimit('compare', { max: 60, windowMs: 60_000, noun: 'comparison' }), route(async (req, res) => {
   const userId = authed(req).user.id;
-  const roleId = String(req.body?.roleId ?? '');
+  const roleId = v.id(req.body?.roleId, 'roleId');
   const role = await store.findRole(userId, roleId);
   if (!role) return res.status(400).json({ error: 'Unknown role.' });
 
   const all = await store.listCandidates(userId, roleId);
-  const ids = req.body?.candidateIds as string[] | undefined;
-  const selected = ids?.length ? all.filter((c) => ids.includes(c.id)) : all;
+  const ids = v.idArray(req.body?.candidateIds, 'candidateIds', 200);
+  const selected = ids.length ? all.filter((c) => ids.includes(c.id)) : all;
   if (!selected.length) return res.json({ role, candidates: [], matrix: [], scarcity: [], overlap: [] });
 
   const matrix: MatrixRow[] = role.requiredSkills.map((skill) => ({
@@ -503,28 +1194,110 @@ app.post('/api/compare', requireAuth, route(async (req, res) => {
 
 /* ---------------------------------------------------------------- errors */
 
-app.use((err: NodeJS.ErrnoException, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: NodeJS.ErrnoException, req: Request, res: Response, _next: NextFunction) => {
+  // A rejected input is the client's mistake, not a server fault: answer 400
+  // with the offending field rather than a 500 with a stack trace.
+  if (v.isValidationError(err)) {
+    return res.status(400).json({ error: err.message, field: err.field });
+  }
   if (err?.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: `File exceeds the ${MAX_FILE_MB} MB limit.` });
   }
   if (err?.code === 'LIMIT_FILE_COUNT') {
     return res.status(413).json({ error: 'Too many files in one batch (max 60).' });
   }
-  console.error('[error]', err);
-  res.status(500).json({ error: err?.message || 'Unexpected server error.' });
+
+  log.error('unhandled route error', {
+    requestId: req.id,
+    method: req.method,
+    path: req.path,
+    ip: req.ip,
+    userId: (req as Partial<AuthedRequest>).user?.id ?? null,
+    message: err?.message,
+    stack: err?.stack,
+  });
+
+  // The stack and driver messages stay in the log. Echoing them to the client
+  // hands an attacker file paths, dependency versions and query shapes; the
+  // request id is what lets support tie a report back to the real error.
+  res.status(500).json({
+    error: 'Unexpected server error.',
+    requestId: req.id,
+  });
 });
 
-const server = app.listen(PORT, () => {
+// Anything that escapes to the process is worth a loud, structured line before
+// the crash, or the restart looks spontaneous in the logs.
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandledRejection', { reason: reason instanceof Error ? reason.stack : String(reason) });
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaughtException', { message: err.message, stack: err.stack });
+  process.exit(1);
+});
+
+/**
+ * Remove upload files no candidate references any more. Cleanup at the call
+ * site is the primary mechanism; this catches whatever a crash, a past bug or
+ * an interrupted batch left behind, so disk use stays bounded.
+ */
+async function sweepOrphanedUploads(): Promise<number> {
+  try {
+    const referenced = await store.referencedFiles();
+    const entries = await fs.readdir(UPLOAD_DIR);
+    let removed = 0;
+
+    for (const name of entries) {
+      if (name === '.gitkeep' || referenced.has(name)) continue;
+
+      // Grace period: a file being written by an in-flight upload is not an
+      // orphan yet, and deleting it would break a request in progress.
+      const filePath = path.join(UPLOAD_DIR, name);
+      const stat = await fs.stat(filePath).catch(() => null);
+      if (!stat || Date.now() - stat.mtimeMs < 15 * 60 * 1000) continue;
+
+      await fs.unlink(filePath).catch(() => {});
+      removed += 1;
+    }
+
+    if (removed) log.warn('swept orphaned uploads', { removed });
+    return removed;
+  } catch (err) {
+    log.warn('orphan sweep failed', { error: (err as Error).message });
+    return 0;
+  }
+}
+
+void sweepOrphanedUploads();
+const orphanSweeper = setInterval(() => void sweepOrphanedUploads(), 6 * 60 * 60 * 1000);
+orphanSweeper.unref();
+
+// Expired sessions linger in the store until something removes them; sweep
+// hourly so the file does not accumulate dead credentials indefinitely.
+const sessionSweeper = setInterval(() => {
+  void store.pruneSessions(isSessionExpired).then((n) => {
+    if (n) console.log(`[sessions] pruned ${n} expired session(s)`);
+  });
+}, 60 * 60 * 1000);
+sessionSweeper.unref();
+
+const server = app.listen(PORT, BIND_HOST, () => {
   const g = gemini.geminiStatus();
-  console.log(`\n  Resume Scanner API  →  http://localhost:${PORT}`);
-  console.log(
-    `  AI engine           →  ${g.enabled ? `Gemini (${g.extractModel} / ${g.reasonModel})` : 'local deterministic (no GEMINI_API_KEY set)'}`,
-  );
-  console.log(`  Uploads             →  ${SUPPORTED_EXTENSIONS.join(' ')}  ·  max ${MAX_FILE_MB} MB\n`);
+  log.info('Resume Scanner API listening', {
+    ...describeConfig(),
+    aiEngine: g.enabled ? `${g.extractModel} / ${g.reasonModel}` : 'local deterministic',
+    uploads: `${SUPPORTED_EXTENSIONS.join(' ')} · max ${MAX_FILE_MB} MB`,
+  });
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    void shutdownOcr().finally(() => server.close(() => process.exit(0)));
+    log.info('shutting down', { signal });
+    void shutdownOcr().finally(() =>
+      server.close(() => {
+        closeLogger();
+        process.exit(0);
+      }),
+    );
   });
 }

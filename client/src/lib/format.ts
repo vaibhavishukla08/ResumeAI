@@ -85,8 +85,30 @@ export function relativeTime(iso: string | undefined): string {
 
 /* --------------------------------------------------------------- export */
 
+/**
+ * Escape a CSV field, defending against formula injection.
+ *
+ * A resume is attacker-supplied data. If a candidate's name is
+ * `=cmd|'/c calc'!A1` and a recruiter opens the export in Excel or Sheets, the
+ * spreadsheet treats it as a formula and executes it — the export becomes a
+ * delivery mechanism for whatever the uploader wrote.
+ *
+ * Prefixing a single quote makes the cell literal text in every spreadsheet
+ * application, and is invisible once opened. Escaping quotes alone, which is
+ * all the previous version did, does not help: the danger is the leading
+ * character, not the quoting.
+ */
+const FORMULA_TRIGGERS = /^[=+\-@\t\r]/;
+
 function csvCell(value: unknown): string {
-  const str = value == null ? '' : String(value);
+  let str = value == null ? '' : String(value);
+
+  // Strip control characters that would break row alignment on import.
+  // eslint-disable-next-line no-control-regex
+  str = str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  if (FORMULA_TRIGGERS.test(str)) str = `'${str}`;
+
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
 

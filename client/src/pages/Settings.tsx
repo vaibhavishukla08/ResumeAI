@@ -1,4 +1,5 @@
-import { api } from '@/lib/api';
+import { useEffect, useState, type FormEvent } from 'react';
+import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/context/ToastContext';
 import type { Workspace } from '@/App';
@@ -54,11 +55,13 @@ export default function Settings({ health, role, candidates, refreshCandidates }
           value={`${candidates.length} candidates`}
           hint="Roles and candidates are scoped to your account alone."
         />
-        <button className="btn-ghost mt-md" onClick={logout}>
+        <button className="btn-ghost mt-md" onClick={() => void logout()}>
           <span className="material-symbols-outlined" style={{ fontSize: 18 }}>logout</span>
           Sign out
         </button>
       </section>
+
+      <SecuritySection />
 
       <section className="panel p-lg">
         <div className="flex items-center gap-sm mb-md flex-wrap">
@@ -185,5 +188,181 @@ export default function Settings({ health, role, candidates, refreshCandidates }
         </button>
       </section>
     </div>
+  );
+}
+
+
+/**
+ * Account security: password change and visible session control.
+ *
+ * Showing active sessions matters more than it looks — it is the only way a
+ * user can notice that somebody else is signed in as them, and "sign out
+ * everywhere" is the fix once they do.
+ */
+interface SessionRow {
+  id: string;
+  current: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  userAgent: string | null;
+  ip: string | null;
+}
+
+function SecuritySection() {
+  const { user, logout } = useAuth();
+  const { push } = useToast();
+
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+
+  const loadSessions = () => {
+    api
+      .sessions()
+      .then((r) => setSessions(r.sessions))
+      .catch(() => setSessions([]));
+  };
+
+  useEffect(loadSessions, []);
+
+  async function changePassword(e: FormEvent) {
+    e.preventDefault();
+    if (next.length < 10) return setError('New password must be at least 10 characters.');
+    if (next !== confirm) return setError('New passwords do not match.');
+
+    setBusy(true);
+    setError(null);
+    try {
+      const { revoked } = await api.changePassword(current, next);
+      setCurrent(''); setNext(''); setConfirm('');
+      push(
+        revoked
+          ? `Password updated. ${revoked} other session(s) signed out.`
+          : 'Password updated.',
+        'success',
+      );
+      loadSessions();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change your password.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function signOutEverywhere() {
+    if (!window.confirm('Sign out of every device, including this one?')) return;
+    try {
+      await api.logoutAll();
+    } finally {
+      // The server has revoked the sessions either way; drop local state too.
+      await logout();
+    }
+  }
+
+  return (
+    <section className="panel p-lg">
+      <h2 className="font-heading text-headline-md mb-md">Security</h2>
+
+      {user?.provider === 'google' ? (
+        <p className="font-body text-body-sm text-on-surface-variant">
+          This account signs in with Google, so there is no password here to change.
+          Manage it from your Google account settings.
+        </p>
+      ) : (
+        <form onSubmit={changePassword} className="space-y-md max-w-sm" noValidate>
+          <label className="block">
+            <span className="label-eyebrow block mb-xs">Current password</span>
+            <input
+              type="password"
+              className="field"
+              value={current}
+              autoComplete="current-password"
+              onChange={(e) => { setCurrent(e.target.value); setError(null); }}
+            />
+          </label>
+          <label className="block">
+            <span className="label-eyebrow block mb-xs">New password</span>
+            <input
+              type="password"
+              className="field"
+              value={next}
+              autoComplete="new-password"
+              placeholder="At least 10 characters"
+              onChange={(e) => { setNext(e.target.value); setError(null); }}
+            />
+          </label>
+          <label className="block">
+            <span className="label-eyebrow block mb-xs">Confirm new password</span>
+            <input
+              type="password"
+              className="field"
+              value={confirm}
+              autoComplete="new-password"
+              onChange={(e) => { setConfirm(e.target.value); setError(null); }}
+            />
+          </label>
+
+          {error && (
+            <p className="font-body text-body-sm text-error animate-slide-down">{error}</p>
+          )}
+
+          <button type="submit" className="btn-primary" disabled={busy || !current || !next}>
+            {busy ? 'Updating…' : 'Change password'}
+          </button>
+        </form>
+      )}
+
+      <div className="mt-lg pt-md border-t border-outline-variant">
+        <div className="flex items-center justify-between gap-md flex-wrap mb-sm">
+          <h3 className="font-body text-body-md font-semibold text-on-surface">
+            Active sessions
+          </h3>
+          <button className="btn-quiet" onClick={loadSessions}>
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>refresh</span>
+            Refresh
+          </button>
+        </div>
+
+        <ul className="space-y-xs">
+          {sessions.map((s) => (
+            <li
+              key={s.id}
+              className="flex items-center gap-sm px-sm py-xs rounded-lg bg-surface-container-high"
+            >
+              <span className="material-symbols-outlined text-on-surface-variant" style={{ fontSize: 17 }}>
+                {s.current ? 'computer' : 'devices'}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="font-body text-body-sm text-on-surface truncate">
+                  {s.userAgent ?? 'Unknown device'}
+                </p>
+                <p className="font-body text-label-md text-on-surface-variant">
+                  last seen {new Date(s.lastSeenAt).toLocaleString()}
+                  {s.ip ? ` · ${s.ip}` : ''}
+                </p>
+              </div>
+              {s.current && (
+                <span className="chip bg-success/12 border-success/35 text-success flex-shrink-0">
+                  This device
+                </span>
+              )}
+            </li>
+          ))}
+          {!sessions.length && (
+            <li className="font-body text-body-sm text-on-surface-variant">
+              No other sessions.
+            </li>
+          )}
+        </ul>
+
+        <button className="btn-danger mt-md" onClick={signOutEverywhere}>
+          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>logout</span>
+          Sign out everywhere
+        </button>
+      </div>
+    </section>
   );
 }

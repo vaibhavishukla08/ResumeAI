@@ -8,21 +8,25 @@ import {
   type ReactNode,
 } from 'react';
 import type { User } from '@shared/types';
-import { api, tokenStore } from '@/lib/api';
+import { api } from '@/lib/api';
 
 interface AuthContextValue {
   user: User | null;
-  /** True until the stored token has been checked against the server. */
+  /** True until the cookie session has been checked against the server. */
   booting: boolean;
   login: (email: string, password: string) => Promise<void>;
+  /** Resolves with the server's acknowledgement — registration grants no session. */
   register: (payload: {
     name: string;
     email: string;
     password: string;
     company?: string;
-  }) => Promise<void>;
+    /** Honeypot value; empty for real users. */
+    website_url?: string;
+  }) => Promise<string>;
   loginWithGoogle: (credential: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -31,61 +35,71 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [booting, setBooting] = useState(true);
 
-  // A token in localStorage is a claim, not proof — verify it before trusting it.
+  /**
+   * There is no token to inspect any more — the session cookie is httpOnly and
+   * invisible to this code. Asking the server who we are is the only way to
+   * know, and it is also the only trustworthy one.
+   */
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
-      if (!tokenStore.get()) {
-        if (!cancelled) setBooting(false);
-        return;
-      }
       try {
         const { user: me } = await api.me();
         if (!cancelled) setUser(me);
       } catch {
-        tokenStore.clear();
+        // 401 simply means "not signed in"; nothing to clean up client-side.
       } finally {
         if (!cancelled) setBooting(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
-    const { token, user: next } = await api.login({ email, password });
-    tokenStore.set(token);
+    const { user: next } = await api.login({ email, password });
     setUser(next);
   }, []);
 
   const register = useCallback(
-    async (payload: { name: string; email: string; password: string; company?: string }) => {
-      const { token, user: next } = await api.register(payload);
-      tokenStore.set(token);
-      setUser(next);
+    async (payload: {
+      name: string; email: string; password: string;
+      company?: string; website_url?: string;
+    }) => {
+      const { message } = await api.register(payload);
+      return message;
     },
     [],
   );
 
   const loginWithGoogle = useCallback(async (credential: string) => {
-    const { token, user: next } = await api.google(credential);
-    tokenStore.set(token);
+    const { user: next } = await api.google(credential);
     setUser(next);
   }, []);
 
-  const logout = useCallback(() => {
-    tokenStore.clear();
+  const logout = useCallback(async () => {
+    try {
+      // Server-side revocation is the part that matters; clearing local state
+      // alone would leave the session usable by anyone holding the cookie.
+      await api.logout();
+    } catch {
+      /* Already expired or offline — fall through and clear locally. */
+    }
     setUser(null);
-    // Clear per-workspace UI state so the next account starts clean.
     localStorage.removeItem('resumeai-role');
   }, []);
 
+  const refresh = useCallback(async () => {
+    try {
+      const { user: me } = await api.me();
+      setUser(me);
+    } catch {
+      setUser(null);
+    }
+  }, []);
+
   const value = useMemo(
-    () => ({ user, booting, login, register, loginWithGoogle, logout }),
-    [user, booting, login, register, loginWithGoogle, logout],
+    () => ({ user, booting, login, register, loginWithGoogle, logout, refresh }),
+    [user, booting, login, register, loginWithGoogle, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

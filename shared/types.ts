@@ -20,18 +20,36 @@ export interface User {
   provider: AuthProvider;
   /** Google profile picture, when signed in through Google. */
   picture?: string | null;
+  /** Data routes are closed until this is true. */
+  emailVerified: boolean;
   createdAt: string;
 }
 
-/** What the server stores. Never leaves the server. */
+/**
+ * What the server stores. Never leaves the server — `publicUser()` is the only
+ * sanctioned way to turn one of these into something a client may see.
+ */
 export interface StoredUser extends User {
   /** Absent for Google accounts — there is no password to hash. */
   passwordHash?: string;
   googleId?: string;
+  /** SHA-256 of the pending email-verification token. */
+  verifyTokenHash?: string | null;
+  verifyTokenExpiresAt?: string | null;
+  /** SHA-256 of the pending password-reset token. Single use. */
+  resetTokenHash?: string | null;
+  resetTokenExpiresAt?: string | null;
+  /** Consecutive failed password attempts, for per-account lockout. */
+  failedLoginCount?: number;
+  lockedUntil?: string | null;
+  passwordChangedAt?: string | null;
 }
 
+/**
+ * The session credential is delivered as an httpOnly cookie and never appears
+ * in a response body, so there is no token field here by design.
+ */
 export interface AuthResponse {
-  token: string;
   user: User;
 }
 

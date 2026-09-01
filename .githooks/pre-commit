@@ -1,0 +1,11 @@
+#!/bin/sh
+# Scan only what is staged. Blocking here is the whole point: once a secret is
+# committed, deleting it does not help — the blob stays in history and in every
+# clone, so the only real fix is rotating the key.
+node deploy/scan-secrets.mjs --staged || {
+  echo ""
+  echo "  Commit blocked: a credential was found in the staged changes."
+  echo "  Remove it and use server/.env, which is gitignored."
+  echo "  To override in an emergency: git commit --no-verify"
+  exit 1
+}

@@ -17,3 +17,19 @@ server/*.traineddata
 # TypeScript build output
 server/dist/
 *.tsbuildinfo
+
+# Credential file patterns. .env is already covered above; these catch the
+# variants people reach for when they are moving fast.
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials.json
+service-account*.json
+*-secrets.y*ml
+
+# Security log, if SECURITY_LOG_FILE points inside the repo.
+*.security.log
