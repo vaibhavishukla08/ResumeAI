@@ -1,0 +1,294 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Palette rooted in the Stitch project. The indigo/navy identity and the
+ * surface ramp are its values; the accent and gradient stops are the evolution.
+ * Space-separated RGB triples so Tailwind's <alpha-value> slot works.
+ */
+
+:root {
+  --primary: 13 116 144;         /* teal — the corporate accent from the reference */
+  --on-primary: 255 255 255;
+  --primary-container: 207 233 240;
+  --on-primary-container: 8 51 68;
+
+  --accent: 8 145 178;           /* cyan — gradient partner */
+  --accent-soft: 186 230 253;
+
+  --ink: 15 42 56;               /* deep slate-teal for headlines */
+  --secondary: 15 118 110;       /* teal 700 */
+  --on-secondary: 255 255 255;
+  --tertiary: 217 119 33;        /* amber — echoes the hero's window lights */
+  --on-tertiary: 255 255 255;
+
+  --success: 5 150 105;
+  --warning: 217 119 6;
+  --error: 220 38 38;
+  --on-error: 255 255 255;
+
+  --background: 248 250 252;
+  --on-background: 15 23 42;
+  --surface: 255 255 255;
+  --on-surface: 15 23 42;
+  --surface-variant: 241 245 249;
+  --on-surface-variant: 71 85 105;
+  --surface-container-lowest: 255 255 255;
+  --surface-container-low: 250 251 253;
+  --surface-container: 255 255 255;
+  --surface-container-high: 244 247 251;
+  --surface-container-highest: 233 239 246;
+
+  --outline: 148 163 184;
+  --outline-variant: 226 232 240;
+
+  --gauge-track: 226 232 240;
+  --preview-page: 255 255 255;
+
+  --grad-a: 13 116 144;
+  --grad-b: 8 145 178;
+  --grad-c: 56 189 248;
+
+  color-scheme: light;
+}
+
+.dark {
+  --primary: 56 189 248;
+  --on-primary: 6 42 56;
+  --primary-container: 12 74 110;
+  --on-primary-container: 186 230 253;
+
+  --accent: 34 211 238;
+  --accent-soft: 12 74 110;
+
+  --ink: 226 240 250;
+  --secondary: 45 212 191;
+  --on-secondary: 4 47 46;
+  --tertiary: 255 183 131;
+  --on-tertiary: 79 37 0;
+
+  --success: 52 211 153;
+  --warning: 251 191 36;
+  --error: 248 113 113;
+  --on-error: 69 0 4;
+
+  /* The Stitch dark ground: #0b1326 and its container ramp. */
+  --background: 8 14 30;
+  --on-background: 218 226 253;
+  --surface: 11 19 38;
+  --on-surface: 226 232 253;
+  --surface-variant: 45 52 73;
+  --on-surface-variant: 158 168 197;
+  --surface-container-lowest: 6 11 24;
+  --surface-container-low: 14 22 43;
+  --surface-container: 19 28 51;
+  --surface-container-high: 27 37 62;
+  --surface-container-highest: 38 48 76;
+
+  --outline: 100 112 143;
+  --outline-variant: 44 54 82;
+
+  --gauge-track: 38 48 76;
+  --preview-page: 14 22 43;
+
+  --grad-a: 34 211 238;
+  --grad-b: 56 189 248;
+  --grad-c: 125 211 252;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-on-background font-body text-body-md;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-heading text-on-surface;
+  }
+
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    direction: ltr;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    user-select: none;
+  }
+  .material-symbols-outlined.filled {
+    font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-outline-variant rounded-full;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-outline; }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-2;
+    --tw-ring-offset-color: rgb(var(--background));
+  }
+
+  ::selection {
+    background: rgb(var(--primary) / 0.25);
+  }
+}
+
+@layer components {
+  /* ---------------------------------------------------------- surfaces */
+
+  .panel {
+    @apply bg-surface-container border border-outline-variant rounded-2xl shadow-soft;
+  }
+
+  /* Frosted card used for the hero and auth surfaces. */
+  .glass {
+    background: rgb(var(--surface-container) / 0.72);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    @apply border border-outline-variant rounded-2xl;
+  }
+
+  /* A 1px gradient hairline, drawn with a mask so the fill stays transparent. */
+  .gradient-border {
+    position: relative;
+  }
+  .gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, rgb(var(--grad-a)), rgb(var(--grad-b)), rgb(var(--grad-c)));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* ---------------------------------------------------------- gradients */
+
+  .gradient-text {
+    background-image: linear-gradient(120deg, rgb(var(--grad-a)), rgb(var(--grad-b)) 45%, rgb(var(--grad-c)));
+    background-size: 200% auto;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    @apply animate-gradient-drift;
+  }
+
+  .gradient-surface {
+    background-image: linear-gradient(135deg, rgb(var(--grad-a)), rgb(var(--grad-b)) 50%, rgb(var(--grad-c)));
+  }
+
+  /* Ambient colour wash behind hero sections. */
+  .gradient-mesh {
+    background-image:
+      radial-gradient(at 18% 12%, rgb(var(--grad-a) / 0.20) 0px, transparent 55%),
+      radial-gradient(at 82% 8%, rgb(var(--grad-c) / 0.16) 0px, transparent 50%),
+      radial-gradient(at 60% 92%, rgb(var(--grad-b) / 0.14) 0px, transparent 55%);
+  }
+
+  /* ------------------------------------------------------------ buttons */
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-sm rounded-lg font-body text-body-sm font-semibold
+           transition-all duration-200 ease-smooth active:scale-[0.97]
+           disabled:opacity-50 disabled:pointer-events-none whitespace-nowrap;
+  }
+
+  .btn-primary {
+    @apply btn gradient-surface text-white px-md py-sm shadow-soft
+           hover:shadow-glow hover:brightness-110;
+  }
+
+  .btn-solid {
+    @apply btn bg-primary text-on-primary px-md py-sm hover:brightness-110 shadow-soft;
+  }
+
+  .btn-ghost {
+    @apply btn bg-surface-container-high text-on-surface border border-outline-variant px-md py-sm
+           hover:border-primary/60 hover:text-primary hover:shadow-soft;
+  }
+
+  .btn-quiet {
+    @apply btn text-on-surface-variant px-sm py-xs hover:text-primary hover:bg-primary/10 rounded-lg;
+  }
+
+  .btn-danger {
+    @apply btn bg-error/10 text-error border border-error/30 px-md py-sm hover:bg-error/16;
+  }
+
+  /* ------------------------------------------------------------- inputs */
+
+  .field {
+    @apply w-full bg-surface-container-high border border-outline-variant text-on-surface
+           font-body text-body-sm rounded-lg px-md py-sm
+           focus:border-primary focus:ring-2 focus:ring-primary/25 focus:outline-none
+           placeholder:text-on-surface-variant/70 transition-all duration-200;
+  }
+
+  .field-error {
+    @apply border-error focus:border-error focus:ring-error/25;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-xs px-sm py-xs rounded-full font-body text-body-sm
+           border transition-all duration-200;
+  }
+
+  .label-eyebrow {
+    @apply font-body text-label-md uppercase text-on-surface-variant;
+  }
+
+  /* ------------------------------------------------------------- motion */
+
+  /* Staggered entrance for lists: set --i on each child. */
+  .stagger > * {
+    animation: slide-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 45ms);
+  }
+
+  .hover-lift {
+    @apply transition-all duration-300 ease-smooth;
+  }
+  .hover-lift:hover {
+    @apply -translate-y-0.5 shadow-lift;
+  }
+
+  /* Skeleton shimmer for loading states. */
+  .skeleton {
+    @apply relative overflow-hidden bg-surface-container-high rounded-lg;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full animate-shimmer;
+    background: linear-gradient(90deg, transparent, rgb(var(--on-surface) / 0.07), transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

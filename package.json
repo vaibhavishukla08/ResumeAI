@@ -1,0 +1,16 @@
+{
+  "name": "resume-scanner",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI resume screening and candidate ranking \u2014 upload PDFs or photos, score against a role, compare a whole pool.",
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev": "node scripts/dev.js",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "start": "npm start --prefix server",
+    "typecheck": "npm run typecheck --prefix server && npm run typecheck --prefix client"
+  }
+}

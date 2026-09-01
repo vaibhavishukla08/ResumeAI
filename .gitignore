@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# Uploaded resumes and the local datastore — real candidate data, never commit.
+server/uploads/*
+!server/uploads/.gitkeep
+server/data/db.json
+
+.DS_Store
+*.log
+
+# Tesseract language data, downloaded on first OCR run.
+server/*.traineddata
+
+# TypeScript build output
+server/dist/
+*.tsbuildinfo
