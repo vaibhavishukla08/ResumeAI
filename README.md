@@ -26,6 +26,35 @@ fully offline. The **first account you register becomes the admin**.
 
 ---
 
+## Any profession, not just tech
+
+The scoring engine was always domain-agnostic — it matches required skills
+against detected ones. The taxonomy was the only thing making it a
+developer-only tool. It now covers **207 skills across 23 categories**:
+
+Healthcare · Finance · Legal · Marketing · Sales · Human Resources ·
+Operations · Project Management · Design · Engineering · Education ·
+Service & Trades · Administration · Spoken Languages — alongside the original
+software categories.
+
+New accounts are seeded with six starter roles spanning nursing, finance,
+marketing and engineering, so the breadth is visible immediately.
+
+Verified: a nurse's resume scores **95 against Registered Nurse** (10/10 skills)
+and **25 against Financial Analyst** — the engine discriminates across domains,
+not merely within one.
+
+### Reading the hero video
+
+The hero uses `client/public/video/hero.mp4` with `client/public/img/hero.jpg`
+as its poster. `object-cover` on a fixed-size parent keeps the frame sharp: the
+element is cropped rather than upscaled, which is what prevents the softness
+people read as "blurry video". If the file is absent, slow, or autoplay is
+refused (iOS Low Power Mode), the poster stands in and the section stays fully
+composed.
+
+---
+
 ## The three scores
 
 The central design decision is that **three different numbers mean three different
@@ -318,6 +347,11 @@ resume is attacker-supplied data, and a candidate named `=cmd|'/c calc'!A1`
 turns the export into a delivery mechanism the moment a recruiter opens it in
 Excel. Cells beginning `=`, `+`, `-` or `@` are now prefixed so spreadsheets
 treat them as literal text.
+
+Reports export as a **paginated A4 PDF** — branded, with a header rule and
+footer on every page so a detached sheet is still identifiable. jsPDF is
+dynamically imported, so the 390 KB library is fetched on the export click
+rather than shipped in the initial bundle (main chunk: 687 KB → 312 KB).
 
 Rejections return **400 with the offending field name**, never a 500 — an
 invalid input is the client's mistake, not a server fault.

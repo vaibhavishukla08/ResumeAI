@@ -25,8 +25,20 @@ import { recordAuthEvent } from './audit.js';
 const DECLARED_AUTOMATION =
   /\b(curl|wget|python-requests|httpie|go-http-client|java|okhttp|axios|node-fetch|postman|insomnia|scrapy|libwww|httpclient)\b/i;
 
-/** Headless and crawler markers. */
-const HEADLESS_MARKERS = /\b(headlesschrome|phantomjs|puppeteer|playwright|selenium|electron\/)\b/i;
+/**
+ * Genuine automation runtimes.
+ *
+ * `electron/` used to be in this list and had to come out. Electron is an
+ * ordinary desktop app shell — Slack, VS Code, Notion and Discord all ship it,
+ * and so does any customer running this app in a wrapper. Treating it as
+ * headless scored every one of those users at 3, which combined with a normal
+ * fast burst of dashboard requests to produce a hard 429. A real browser
+ * driven by a real person was being refused.
+ *
+ * HeadlessChrome, puppeteer, playwright and selenium are automation by
+ * definition. Electron is not.
+ */
+const HEADLESS_MARKERS = /\b(headlesschrome|phantomjs|puppeteer|playwright|selenium|webdriver)\b/i;
 
 const CRAWLERS =
   /\b(googlebot|bingbot|slurp|duckduckbot|baiduspider|yandexbot|ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|gptbot|ccbot|claudebot)\b/i;
@@ -138,11 +150,21 @@ function profile(key: string): Behaviour {
   return entry;
 }
 
-/** Median inter-arrival gap. Median, not mean, so one pause cannot hide a flood. */
+/**
+ * Median inter-arrival gap over the most recent requests.
+ *
+ * Median, not mean, so one pause cannot hide a flood — and only the recent
+ * slice, so someone who slows down recovers within a few requests instead of
+ * staying blocked for the whole five-minute window on the strength of an
+ * earlier burst.
+ */
+const CADENCE_SAMPLE = 20;
+
 function medianGap(times: number[]): number | null {
-  if (times.length < 8) return null;
+  const recent = times.slice(-CADENCE_SAMPLE);
+  if (recent.length < 8) return null;
   const gaps: number[] = [];
-  for (let i = 1; i < times.length; i++) gaps.push(times[i] - times[i - 1]);
+  for (let i = 1; i < recent.length; i++) gaps.push(recent[i] - recent[i - 1]);
   gaps.sort((a, b) => a - b);
   return gaps[Math.floor(gaps.length / 2)];
 }
@@ -244,7 +266,9 @@ function alert(key: string, req: Request, event: string, meta: object): void {
   log.security(event, {
     principal: key,
     ip: clientIp(req),
-    ua: String(req.headers['user-agent'] ?? '').slice(0, 120),
+    // Full UA. The previous 120-char cap sliced off the "Electron/42.9.2"
+    // that was causing the refusal, making the log actively misleading.
+    ua: String(req.headers['user-agent'] ?? '').slice(0, 256),
     path: req.path,
     requestId: req.id,
     ...meta,

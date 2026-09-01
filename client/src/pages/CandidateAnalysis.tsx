@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import type { Analysis, Candidate, InsightType } from '@shared/types';
 import ScoreGauge, { ScoreBar } from '@/components/ScoreGauge';
 import SkillMatch from '@/components/SkillMatch';
 import DocumentPreview from '@/components/DocumentPreview';
 import { api } from '@/lib/api';
-import { pct, toneClass, downloadFile } from '@/lib/format';
+import { pct, toneClass } from '@/lib/format';
+import { downloadCandidateReport } from '@/lib/report-pdf';
 import { useToast } from '@/context/ToastContext';
 import type { Workspace } from '@/App';
 
@@ -62,12 +63,27 @@ function DualScore({ analysis }: { analysis: Analysis }) {
   );
 }
 
-export default function CandidateAnalysis({ role, setStatus }: Workspace) {
+export default function CandidateAnalysis({ roles, setStatus }: Workspace) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { push } = useToast();
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Must sit above the early returns below: a hook called only on renders that
+  // get past them changes the hook order between renders, which React treats
+  // as a fatal error rather than a warning.
+  const [exporting, setExporting] = useState(false);
+
+  /**
+   * The role this candidate was actually screened against — resolved from the
+   * candidate's own roleId, not from whatever is selected in the top bar.
+   * Using the selected role attributed the candidate to the wrong requisition
+   * on screen and, worse, printed the wrong role into the exported PDF.
+   */
+  const role = useMemo(
+    () => roles.find((r) => r.id === candidate?.roleId) ?? null,
+    [roles, candidate?.roleId],
+  );
 
   useEffect(() => {
     if (!id) return;
@@ -105,61 +121,17 @@ export default function CandidateAnalysis({ role, setStatus }: Workspace) {
 
   const { analysis, parsed, recommendation } = candidate;
 
-  function exportReport() {
-    if (!candidate) return;
-    const lines = [
-      `CANDIDATE REPORT — ${parsed.name}`,
-      `Role: ${role?.title ?? candidate.roleId}`,
-      `Generated: ${new Date().toLocaleString()}`,
-      `Engine: ${candidate.engine}`,
-      '',
-      `Overall score:    ${analysis.overall}/100  (${analysis.band.label})`,
-      `ATS score:        ${analysis.atsScore}/100`,
-      `JD similarity:    ${pct(analysis.similarity)}  [objective]`,
-      `Confidence:       ${pct(analysis.confidence)}  [subjective]`,
-      `Skill coverage:   ${pct(analysis.skills.coverage)} (${analysis.skills.matchedCount}/${analysis.skills.requiredCount})`,
-      `Experience:       ${parsed.experienceYears ?? 'unknown'} years — ${analysis.experienceFit.note}`,
-      `Education:        ${parsed.education?.highestLevel ?? 'unknown'}`,
-      '',
-      'CONTACT',
-      `  Email: ${parsed.contact?.email ?? '—'}`,
-      `  Phone: ${parsed.contact?.phone ?? '—'}`,
-      '',
-      'MATCHED SKILLS',
-      ...analysis.skills.matched.map(
-        (s) => `  ✓ ${s.label} (${s.mentions} mention${s.mentions === 1 ? '' : 's'})`,
-      ),
-      '',
-      'MISSING SKILLS',
-      ...(analysis.skills.missing.length
-        ? analysis.skills.missing.map((s) => `  ✗ ${s.label}${s.weight >= 3 ? '  [MUST-HAVE]' : ''}`)
-        : ['  none']),
-      '',
-      'ATS BREAKDOWN',
-      ...analysis.breakdown.map(
-        (b) =>
-          `  ${b.key.padEnd(22)} ${String(Math.round(b.score * 100)).padStart(3)}%  (weight ${b.weight})  — ${b.detail}`,
-      ),
-      '',
-      'INSIGHTS',
-      ...analysis.insights.flatMap((i) => [`  [${i.type.toUpperCase()}] ${i.title}`, `    ${i.body}`, '']),
-    ];
-
-    if (recommendation) {
-      lines.push(
-        'AI RECOMMENDATION',
-        `  Verdict: ${recommendation.verdict}  (model confidence ${pct(recommendation.confidence)})`,
-        `  ${recommendation.summary}`,
-        '',
-        '  Strengths:',
-        ...recommendation.strengths.map((s) => `    • ${s}`),
-        '  Concerns:',
-        ...recommendation.concerns.map((s) => `    • ${s}`),
-      );
+  async function exportReport() {
+    if (!candidate || exporting) return;
+    setExporting(true);
+    try {
+      const filename = await downloadCandidateReport(candidate, role);
+      push(`Downloaded ${filename}`, 'success');
+    } catch (err) {
+      push(`Could not generate the PDF: ${(err as Error).message}`, 'error');
+    } finally {
+      setExporting(false);
     }
-
-    downloadFile(lines.join('\n'), `${parsed.name.replace(/\s+/g, '-')}-report.txt`);
-    push('Report downloaded.', 'success');
   }
 
   return (
@@ -223,9 +195,14 @@ export default function CandidateAnalysis({ role, setStatus }: Workspace) {
         </div>
 
         <div className="flex items-center gap-sm">
-          <button className="btn-ghost" onClick={exportReport}>
-            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>download</span>
-            Export report
+          <button className="btn-ghost" onClick={exportReport} disabled={exporting}>
+            <span
+              className={`material-symbols-outlined ${exporting ? 'animate-spin' : ''}`}
+              style={{ fontSize: 18 }}
+            >
+              {exporting ? 'progress_activity' : 'picture_as_pdf'}
+            </span>
+            {exporting ? 'Building PDF…' : 'Export PDF'}
           </button>
           <button
             className="btn-primary"

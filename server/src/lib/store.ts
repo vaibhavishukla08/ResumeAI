@@ -68,6 +68,42 @@ const STARTER_ROLES: Omit<RoleRecord, 'userId'>[] = [
     mustHave: ['python', 'ml', 'llm'],
   },
   {
+    id: 'registered-nurse',
+    title: 'Registered Nurse — Acute Care',
+    department: 'Clinical',
+    minYears: 2,
+    maxYears: null,
+    description:
+      'Deliver direct patient care on a busy acute ward. Assess and triage on admission, administer medication and IV therapy, maintain accurate records in the EHR, and coordinate discharge planning with the wider team. Current ACLS and BLS certification required; strong infection-control discipline expected.',
+    required:
+      'Patient Care, Clinical Assessment, Medication Administration, EHR / EMR, ACLS, BLS / CPR, Infection Control, HIPAA Compliance, Care Planning, Communication',
+    mustHave: ['patient-care', 'clinical-assessment', 'bls-cpr'],
+  },
+  {
+    id: 'financial-analyst',
+    title: 'Financial Analyst',
+    department: 'Finance',
+    minYears: 3,
+    maxYears: null,
+    description:
+      'Own the monthly reporting cycle and the rolling forecast. Build and maintain financial models, run variance analysis against budget, and present findings to non-finance stakeholders. Comfortable in Excel to an advanced standard and with an ERP as the system of record.',
+    required:
+      'Financial Reporting, Financial Modelling, Budgeting & Forecasting, GAAP, Microsoft Office, SAP / ERP, Attention to Detail, Communication, Statistics',
+    mustHave: ['financial-reporting', 'financial-modeling', 'budgeting'],
+  },
+  {
+    id: 'marketing-manager',
+    title: 'Marketing Manager',
+    department: 'Marketing',
+    minYears: 4,
+    maxYears: null,
+    description:
+      'Own demand generation end to end: campaign strategy, channel mix, and the reporting that proves what worked. Manage paid search and social budgets, shape the content calendar, and use analytics to decide where the next pound goes rather than defending where the last one went.',
+    required:
+      'Campaign Management, SEO, SEM / Paid Search, Content Marketing, Social Media Marketing, Email Marketing, Google Analytics, Brand Management, CRM, Communication',
+    mustHave: ['campaign-management', 'google-analytics', 'content-marketing'],
+  },
+  {
     id: 'backend-engineer',
     title: 'Backend Engineer',
     department: 'Engineering',

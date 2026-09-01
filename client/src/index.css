@@ -55,43 +55,53 @@
 
 .dark {
   --primary: 56 189 248;
-  --on-primary: 6 42 56;
+  --on-primary: 4 20 28;
   --primary-container: 12 74 110;
   --on-primary-container: 186 230 253;
 
   --accent: 34 211 238;
   --accent-soft: 12 74 110;
 
-  --ink: 226 240 250;
+  --ink: 237 240 244;
   --secondary: 45 212 191;
   --on-secondary: 4 47 46;
-  --tertiary: 255 183 131;
-  --on-tertiary: 79 37 0;
+  --tertiary: 251 191 36;
+  --on-tertiary: 41 25 0;
 
   --success: 52 211 153;
   --warning: 251 191 36;
   --error: 248 113 113;
   --on-error: 69 0 4;
 
-  /* The Stitch dark ground: #0b1326 and its container ramp. */
-  --background: 8 14 30;
-  --on-background: 218 226 253;
-  --surface: 11 19 38;
-  --on-surface: 226 232 253;
-  --surface-variant: 45 52 73;
-  --on-surface-variant: 158 168 197;
-  --surface-container-lowest: 6 11 24;
-  --surface-container-low: 14 22 43;
-  --surface-container: 19 28 51;
-  --surface-container-high: 27 37 62;
-  --surface-container-highest: 38 48 76;
+  /*
+   * Neutral greys, not navy.
+   *
+   * The previous ramp carried a blue cast (#080e1e, #0b1326) inherited from
+   * the original Stitch theme, which read as "dark blue app" rather than dark
+   * mode. These are near-neutral with only a trace of warmth so the surfaces
+   * do not go clinically flat, and each step is a real, visible elevation
+   * rather than a one-value nudge.
+   */
+  --background: 10 10 11;              /* #0A0A0B — page ground */
+  --on-background: 237 240 244;
+  --surface: 15 15 17;                 /* #0F0F11 */
+  --on-surface: 240 242 246;
+  --surface-variant: 38 38 42;
+  --on-surface-variant: 161 165 175;
+  --surface-container-lowest: 6 6 7;   /* deepest well */
+  --surface-container-low: 18 18 20;
+  --surface-container: 23 23 26;       /* card ground */
+  --surface-container-high: 31 31 35;  /* raised card, inputs */
+  --surface-container-highest: 41 41 46;
 
-  --outline: 100 112 143;
-  --outline-variant: 44 54 82;
+  --outline: 92 94 102;
+  --outline-variant: 44 44 49;         /* hairline borders */
 
-  --gauge-track: 38 48 76;
-  --preview-page: 14 22 43;
+  --gauge-track: 41 41 46;
+  --preview-page: 18 18 20;
 
+  /* Gradient stops stay in the cyan family — colour lives in the accents,
+     not in the greys, which is what keeps the UI from looking tinted. */
   --grad-a: 34 211 238;
   --grad-b: 56 189 248;
   --grad-c: 125 211 252;
@@ -157,6 +167,17 @@
     @apply bg-surface-container border border-outline-variant rounded-2xl shadow-soft;
   }
 
+  /*
+   * On a near-black ground a drop shadow is invisible — there is nothing
+   * darker for it to fall onto. A one-pixel highlight along the top edge is
+   * what actually separates a card from the page in dark mode.
+   */
+  .dark .panel {
+    box-shadow:
+      inset 0 1px 0 0 rgb(255 255 255 / 0.045),
+      0 1px 3px rgb(0 0 0 / 0.5);
+  }
+
   /* Frosted card used for the hero and auth surfaces. */
   .glass {
     background: rgb(var(--surface-container) / 0.72);
@@ -204,6 +225,15 @@
       radial-gradient(at 18% 12%, rgb(var(--grad-a) / 0.20) 0px, transparent 55%),
       radial-gradient(at 82% 8%, rgb(var(--grad-c) / 0.16) 0px, transparent 50%),
       radial-gradient(at 60% 92%, rgb(var(--grad-b) / 0.14) 0px, transparent 55%);
+  }
+
+  /* Dark mode keeps the ground neutral: the wash is halved so the accents
+     glow against black rather than staining the whole surface blue. */
+  .dark .gradient-mesh {
+    background-image:
+      radial-gradient(at 18% 12%, rgb(var(--grad-a) / 0.10) 0px, transparent 50%),
+      radial-gradient(at 82% 8%, rgb(var(--grad-c) / 0.07) 0px, transparent 45%),
+      radial-gradient(at 60% 92%, rgb(var(--grad-b) / 0.06) 0px, transparent 50%);
   }
 
   /* ------------------------------------------------------------ buttons */

@@ -13,16 +13,16 @@ import { Link } from 'react-router-dom';
 const STATS = [
   { icon: 'group', value: '60', suffix: '', label: 'Resumes per batch' },
   { icon: 'bolt', value: '3', suffix: 's', label: 'Typical batch scan' },
-  { icon: 'checklist', value: '90', suffix: '+', label: 'Skills recognised' },
-  { icon: 'description', value: '4', suffix: '', label: 'File formats' },
+  { icon: 'checklist', value: '200', suffix: '+', label: 'Skills recognised' },
+  { icon: 'workspace_premium', value: '20', suffix: '+', label: 'Professions covered' },
 ];
 
 const CAPABILITIES = [
   {
     icon: 'document_scanner',
     tint: 'bg-primary/12 text-primary',
-    title: 'Any Resume Format',
-    body: 'PDFs, DOCX, phone photos and scans. Documents with no text layer go through OCR automatically.',
+    title: 'Any Resume, Any Field',
+    body: 'PDFs, DOCX, phone photos and scans — screened against healthcare, finance, legal, trades and tech alike.',
   },
   {
     icon: 'balance',
@@ -164,6 +164,31 @@ function TopNav() {
 }
 
 export default function Landing() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [videoFailed, setVideoFailed] = useState(false);
+
+  /**
+   * Some browsers refuse autoplay even when muted — Low Power Mode on iOS is
+   * the common case. Calling play() explicitly recovers most of those; when it
+   * genuinely cannot, the poster is already showing and nothing looks broken.
+   */
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || videoFailed) return;
+
+    const attempt = () => {
+      void el.play().catch(() => {
+        // Autoplay refused. The poster stands in; no error is worth showing.
+      });
+    };
+    attempt();
+
+    // Retry when the tab becomes visible: a video paused in a background tab
+    // otherwise stays paused after the user returns.
+    document.addEventListener('visibilitychange', attempt);
+    return () => document.removeEventListener('visibilitychange', attempt);
+  }, [videoFailed]);
+
   return (
     <div className="bg-background min-h-screen">
       <TopNav />
@@ -171,19 +196,37 @@ export default function Landing() {
       {/* ------------------------------------------------------------ hero */}
       <section className="relative min-h-[92vh] flex items-center pt-2xl overflow-hidden">
         <div className="absolute inset-0" aria-hidden="true">
-          {/* Framed on the lit facades rather than the water — they are the
-              strongest part of the shot, and a wide crop centred lower loses
-              them. The filter adds the contrast the dusk exposure lacks, so the
-              architecture and window lights read crisply instead of hazy. */}
-          <img
-            src="/img/hero.jpg"
-            alt=""
+          {/*
+            Video with the still as its poster.
+
+            object-cover on a fixed-size parent is what keeps the frame sharp:
+            the element is never scaled beyond its native resolution, it is
+            cropped. Scaling a 720p source up to a 1440px viewport is what
+            produces the softness people read as "blurry video".
+
+            The poster is the existing hero still, so the section is fully
+            composed on first paint and stays composed if the video is missing,
+            slow, or refused by a data-saver setting.
+          */}
+          <video
+            ref={videoRef}
             className="w-full h-full object-cover object-[center_40%]"
+            poster="/img/hero.jpg"
+            autoPlay
+            muted
+            loop
+            playsInline
+            preload="metadata"
+            // Contrast lifts the dusk footage the same way it does the still,
+            // so the two are interchangeable rather than visibly different.
             style={{ filter: 'contrast(1.12) saturate(1.18) brightness(0.98)' }}
-          />
+            onError={() => setVideoFailed(true)}
+          >
+            <source src="/video/hero.mp4" type="video/mp4" />
+          </video>
 
           {/* Horizontal readability ramp. Solid only under the headline, then
-              falls away fast — past ~62% the photograph is untouched, which is
+              falls away fast — past ~62% the footage is untouched, which is
               what stops the whole hero looking washed out. */}
           <div
             className="absolute inset-0"
@@ -194,7 +237,7 @@ export default function Landing() {
           />
 
           {/* Narrow top fade so the transparent nav stays readable over the
-              bright part of the photo, without lightening the hero itself. */}
+              bright part of the frame, without lightening the hero itself. */}
           <div
             className="absolute inset-x-0 top-0 h-32"
             style={{
@@ -212,7 +255,7 @@ export default function Landing() {
             }}
           />
 
-          {/* Faint brand tint over the exposed half, so the photo belongs to
+          {/* Faint brand tint over the exposed half, so the footage belongs to
               the palette rather than sitting on top of it. */}
           <div
             className="absolute inset-0 mix-blend-soft-light"
@@ -237,8 +280,9 @@ export default function Landing() {
             </h1>
 
             <p className="font-body text-body-lg lg:text-[20px] lg:leading-[32px] text-on-surface-variant mt-md max-w-xl">
-              Upload a batch of resumes, rank them against the role, and see exactly which
-              skills matched, which are missing, and how much to trust each result.
+              Upload a batch of resumes for any role — nurse, analyst, electrician, engineer —
+              and see exactly which skills matched, which are missing, and how much to
+              trust each result.
             </p>
 
             <div className="flex flex-wrap items-center gap-sm mt-lg">
