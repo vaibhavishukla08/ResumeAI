@@ -117,7 +117,7 @@ const TAXONOMY: TaxonomyEntry[] = [
   // ---- Healthcare & Medical -------------------------------------------
   { id: 'patient-care', label: 'Patient Care', category: 'Healthcare', aliases: ['patient management', 'direct patient care', 'bedside care'] },
   { id: 'clinical-assessment', label: 'Clinical Assessment', category: 'Healthcare', aliases: ['patient assessment', 'clinical evaluation', 'triage'] },
-  { id: 'ehr', label: 'EHR / EMR', category: 'Healthcare', aliases: ['epic', 'cerner', 'meditech', 'electronic health record', 'electronic medical record', 'allscripts'] },
+  { id: 'ehr', label: 'EHR / EMR', category: 'Healthcare', aliases: ['epic', 'epic ehr', 'epic emr', 'cerner', 'cerner ehr', 'meditech', 'allscripts', 'electronic health record', 'electronic medical record', 'ehr', 'emr'] },
   { id: 'medication-admin', label: 'Medication Administration', category: 'Healthcare', aliases: ['med administration', 'drug administration', 'iv therapy'] },
   { id: 'phlebotomy', label: 'Phlebotomy', category: 'Healthcare', aliases: ['venipuncture', 'blood draw'] },
   { id: 'acls', label: 'ACLS', category: 'Healthcare', aliases: ['advanced cardiac life support'] },
@@ -334,7 +334,9 @@ const PHRASES = [
 ].sort((a, b) => b.length - a.length);
 
 export const CATEGORIES: string[] = [...new Set(TAXONOMY.map((s) => s.category))];
-export const ALL_SKILLS: Skill[] = TAXONOMY.map(({ id, label, category }) => ({ id, label, category }));
+export const ALL_SKILLS: Skill[] = TAXONOMY.map(({ id, label, category, aliases }) => ({
+  id, label, category, aliases,
+}));
 
 /** Resolve any free-text token to a canonical skill, or null. */
 export function canonical(term: string | null | undefined): TaxonomyEntry | null {
@@ -403,6 +405,37 @@ function snippetAt(text: string, index: number): string {
 }
 
 /**
+ * Resolve any free-text term to the id it will carry as a requirement.
+ *
+ * This is the single source of truth for that mapping, and it exists because
+ * there used to be two. `parseRequiredSkills` minted `custom:<label>` for a
+ * term the taxonomy did not know, while the route that stored must-have flags
+ * kept the raw label — so marking "Epic EHR" as must-have produced a weights
+ * lookup for `custom:epic ehr` against a stored `"Epic EHR"`, which never
+ * matched. The flag was silently dropped and the skill scored as optional.
+ *
+ * Both callers now derive the id here, so the two cannot drift again.
+ */
+export function resolveSkillId(term: string): string {
+  const raw = term.trim();
+
+  // A stored `custom:foo` came from a save made when the taxonomy did not know
+  // "foo". It may know it now — adding "epic ehr" as an alias is exactly that
+  // case — so the inner term is re-checked rather than trusted. Without this,
+  // roles written before a taxonomy update keep pointing at an id that no
+  // longer appears in their own requirement list, and the flag stays lost.
+  if (raw.toLowerCase().startsWith('custom:')) {
+    const inner = raw.slice('custom:'.length).trim();
+    const relearned = canonical(inner);
+    return relearned ? relearned.id : `custom:${inner.toLowerCase()}`;
+  }
+
+  const hit = canonical(raw);
+  if (hit) return hit.id;
+  return `custom:${raw.toLowerCase()}`;
+}
+
+/**
  * Parse a comma / newline separated requirement list into canonical skills.
  * Unknown terms are preserved as free-text requirements so a recruiter can
  * still require something the taxonomy has never seen.
@@ -417,7 +450,7 @@ export function parseRequiredSkills(input: string | string[] | null | undefined)
     const term = String(raw).trim();
     if (!term) continue;
     const hit = canonical(term);
-    const id = hit ? hit.id : `custom:${term.toLowerCase()}`;
+    const id = resolveSkillId(term);
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(

@@ -59,6 +59,12 @@ export interface Skill {
   id: string;
   label: string;
   category: string;
+  /**
+   * Alternate spellings the server recognises. Sent to the client so the role
+   * editor can show whether a typed term was understood, using exactly the
+   * same matching rule rather than an approximation of it.
+   */
+  aliases?: string[];
 }
 
 export interface RequiredSkill extends Skill {

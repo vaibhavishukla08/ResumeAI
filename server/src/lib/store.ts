@@ -15,7 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { parseRequiredSkills } from './skills.js';
+import { parseRequiredSkills, resolveSkillId } from './skills.js';
 import type { Candidate, Role, RoleInput, StoredUser } from '../../../shared/types.js';
 import type { SessionRecord } from './sessions.js';
 
@@ -117,11 +117,28 @@ const STARTER_ROLES: Omit<RoleRecord, 'userId'>[] = [
   },
 ];
 
+/**
+ * Derive the requirement list and weights from what the role stores.
+ *
+ * `mustHave` holds the terms the user typed, and they are resolved to ids
+ * *here*, at read time, rather than being resolved once at write time. That
+ * matters because the taxonomy changes: adding "epic ehr" as an alias turned a
+ * term that used to resolve to `custom:epic ehr` into `ehr`, and every role
+ * saved before that change silently lost the flag — the stored id no longer
+ * matched anything in its own requirement list.
+ *
+ * Resolving on read means stored data records the user's intent and the current
+ * taxonomy decides what it means, so a taxonomy update fixes old roles instead
+ * of stranding them. Ids already stored by the previous behaviour still match,
+ * since resolving an id returns itself.
+ */
 function hydrateRole(role: RoleRecord): Role {
   const requiredSkills = parseRequiredSkills(role.required);
+  const mustHaveIds = new Set(role.mustHave.map((term) => resolveSkillId(term)));
+
   const weights: Record<string, number> = {};
   for (const skill of requiredSkills) {
-    weights[skill.id] = role.mustHave.includes(skill.id) ? 3 : 1;
+    weights[skill.id] = mustHaveIds.has(skill.id) ? 3 : 1;
   }
   return { ...role, requiredSkills, weights };
 }

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { extractText, SUPPORTED_EXTENSIONS, shutdownOcr } from './lib/extract.js';
 import { parseResume } from './lib/parse.js';
 import { analyze, cosineSimilarity } from './lib/score.js';
-import { ALL_SKILLS, CATEGORIES, canonical } from './lib/skills.js';
+import { ALL_SKILLS, CATEGORIES } from './lib/skills.js';
 import * as store from './lib/store.js';
 import * as gemini from './lib/gemini.js';
 import cookieParser from 'cookie-parser';
@@ -737,9 +737,10 @@ app.post('/api/roles', requireAuth, requireVerified, route(async (req, res) => {
     required: v.text(body.required, 'required', 4_000, false),
     minYears: v.int(body.minYears, 'minYears', { min: 0, max: 60, optional: true }) ?? 0,
     maxYears: v.int(body.maxYears, 'maxYears', { min: 0, max: 60, optional: true }),
-    mustHave: v.stringArray(body.mustHave, 'mustHave', 60, 60)
-      .map((m) => canonical(m)?.id ?? m)
-      .filter(Boolean),
+    // Stored as the terms the user actually typed. hydrateRole resolves them
+    // against the current taxonomy on read, so a later alias addition repairs
+    // old roles rather than stranding their flags.
+    mustHave: v.stringArray(body.mustHave, 'mustHave', 60, 60).filter(Boolean),
   };
 
   if (!input.required.trim()) {

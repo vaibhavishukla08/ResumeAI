@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { RoleInput, Role } from '@shared/types';
 import { api } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
@@ -22,7 +22,7 @@ const BLANK: Draft = {
 };
 
 export default function Roles({
-  roles, roleId, candidates, refreshRoles, refreshCandidates,
+  roles, roleId, candidates, skills, refreshRoles, refreshCandidates,
 }: Workspace) {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -82,11 +82,45 @@ export default function Roles({
     }
   }
 
-  /** Preview which terms the taxonomy will recognise as we type. */
-  const previewSkills = (editing?.required ?? '')
-    .split(/[,\n;|]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  /**
+   * Resolve a typed term the same way the server does: exact match on a skill's
+   * label or on any of its aliases, case-insensitively. Building the lookup from
+   * the same data the server sends means the badge shown here cannot disagree
+   * with the id the role is actually stored under.
+   */
+  const lookup = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; category: string }>();
+    for (const skill of skills) {
+      map.set(skill.label.toLowerCase(), skill);
+      for (const alias of skill.aliases ?? []) map.set(alias.toLowerCase(), skill);
+    }
+    return map;
+  }, [skills]);
+
+  /** Each typed term, with whether the taxonomy recognised it. */
+  const previewSkills = useMemo(() => {
+    const seen = new Set<string>();
+    return (editing?.required ?? '')
+      .split(/[,\n;|]+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((typed) => {
+        const match = lookup.get(typed.toLowerCase());
+        return {
+          typed,
+          matched: match ?? null,
+          // What the role will actually be keyed on once saved.
+          id: match ? match.id : `custom:${typed.toLowerCase()}`,
+        };
+      })
+      .filter((entry) => {
+        if (seen.has(entry.id)) return false;
+        seen.add(entry.id);
+        return true;
+      });
+  }, [editing?.required, lookup]);
+
+  const recognised = previewSkills.filter((p) => p.matched).length;
 
   return (
     <div className="space-y-lg">
@@ -165,26 +199,51 @@ export default function Roles({
 
           {previewSkills.length > 0 && (
             <div className="mt-sm animate-slide-down">
-              <p className="label-eyebrow mb-xs">Click a skill to mark it must-have (weighted 3×)</p>
+              <div className="flex items-baseline justify-between gap-md mb-xs flex-wrap">
+                <p className="label-eyebrow">
+                  Click a skill to mark it must-have (weighted 3×)
+                </p>
+                <p className="font-body text-body-sm text-on-surface-variant">
+                  <span className="text-success font-semibold">{recognised}</span> recognised
+                  {previewSkills.length - recognised > 0 && (
+                    <>
+                      {' · '}
+                      <span className="text-warning font-semibold">
+                        {previewSkills.length - recognised}
+                      </span>{' '}
+                      custom
+                    </>
+                  )}
+                </p>
+              </div>
+
               <div className="flex flex-wrap gap-xs">
-                {previewSkills.map((label) => {
-                  const key = label.toLowerCase();
+                {previewSkills.map(({ typed, matched }) => {
+                  const key = typed.toLowerCase();
                   const on = editing.mustHave.some((m) => m.toLowerCase() === key);
                   return (
                     <button
-                      key={label}
+                      key={typed}
+                      type="button"
                       onClick={() =>
                         setEditing({
                           ...editing,
                           mustHave: on
                             ? editing.mustHave.filter((m) => m.toLowerCase() !== key)
-                            : [...editing.mustHave, label],
+                            : [...editing.mustHave, typed],
                         })
+                      }
+                      title={
+                        matched
+                          ? `Recognised as "${matched.label}" (${matched.category}). Detected in resumes under that name and its aliases.`
+                          : 'Not in the skill library — matched literally against resume text. Still works, but only exact wording will match.'
                       }
                       className={`chip hover:scale-105 ${
                         on
                           ? 'bg-primary/12 border-primary/35 text-primary font-semibold'
-                          : 'bg-surface-container-high border-outline-variant text-on-surface-variant'
+                          : matched
+                            ? 'bg-surface-container-high border-outline-variant text-on-surface'
+                            : 'bg-warning/10 border-warning/30 text-warning'
                       }`}
                     >
                       {on && (
@@ -192,11 +251,29 @@ export default function Roles({
                           priority_high
                         </span>
                       )}
-                      {label}
+                      {matched ? matched.label : typed}
+                      {!matched && (
+                        <span
+                          className="material-symbols-outlined"
+                          style={{ fontSize: 13 }}
+                          aria-label="custom skill"
+                        >
+                          help
+                        </span>
+                      )}
                     </button>
                   );
                 })}
               </div>
+
+              {previewSkills.length - recognised > 0 && (
+                <p className="font-body text-body-sm text-on-surface-variant mt-sm">
+                  Amber skills are not in the library. They still work — they are
+                  matched literally against the resume text — but only that exact
+                  wording will match, so a synonym on the candidate's resume will
+                  be missed. Renaming to the library term picks up its aliases too.
+                </p>
+              )}
             </div>
           )}
 
