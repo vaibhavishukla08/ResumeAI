@@ -135,15 +135,15 @@ function TopNav() {
               readiness_score
             </span>
           </div>
-          <span className="font-heading text-title tracking-tight text-on-surface">ResumeAI</span>
+          <span className="font-heading text-headline-md tracking-tight text-on-surface">ResumeAI</span>
         </Link>
 
-        <ul className="hidden lg:flex items-center gap-lg">
+        <ul className="hidden lg:flex items-center gap-xl">
           {['Capabilities', 'How it works', 'Scoring'].map((item) => (
             <li key={item}>
               <a
                 href={`#${item.toLowerCase().replace(/\s+/g, '-')}`}
-                className="font-body text-body-sm text-on-surface-variant hover:text-primary transition-colors"
+                className="font-body text-body-md font-medium text-on-surface-variant hover:text-primary transition-colors"
               >
                 {item}
               </a>
@@ -152,10 +152,10 @@ function TopNav() {
         </ul>
 
         <div className="flex items-center gap-sm">
-          <Link to="/signin" className="btn-quiet hidden sm:inline-flex">Sign in</Link>
-          <Link to="/signin?mode=register" className="btn-primary">
+          <Link to="/signin" className="btn-quiet hidden sm:inline-flex text-body-md">Sign in</Link>
+          <Link to="/signin?mode=register" className="btn-primary text-body-md px-md py-sm">
             Get Started
-            <span className="material-symbols-outlined" style={{ fontSize: 17 }}>arrow_forward</span>
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>arrow_forward</span>
           </Link>
         </div>
       </nav>
@@ -168,25 +168,47 @@ export default function Landing() {
   const [videoFailed, setVideoFailed] = useState(false);
 
   /**
-   * Some browsers refuse autoplay even when muted — Low Power Mode on iOS is
-   * the common case. Calling play() explicitly recovers most of those; when it
-   * genuinely cannot, the poster is already showing and nothing looks broken.
+   * Keep the hero playing.
+   *
+   * Muted autoplay is permitted everywhere, but it still gets refused or
+   * silently suspended in real conditions: iOS Low Power Mode, a background
+   * tab, a data-saver setting, or a decoder that was evicted while the tab was
+   * hidden. Rather than assume the `autoplay` attribute is enough, nudge it
+   * whenever the element reaches a state where playing is possible again.
+   *
+   * Every failure path is silent by design — the poster is already on screen,
+   * so a refusal looks like a still hero rather than something broken.
    */
   useEffect(() => {
     const el = videoRef.current;
     if (!el || videoFailed) return;
 
-    const attempt = () => {
-      void el.play().catch(() => {
-        // Autoplay refused. The poster stands in; no error is worth showing.
-      });
+    const nudge = () => {
+      if (el.paused && !document.hidden) {
+        void el.play().catch(() => {
+          /* Refused. The poster stands in; nothing to report. */
+        });
+      }
     };
-    attempt();
 
-    // Retry when the tab becomes visible: a video paused in a background tab
-    // otherwise stays paused after the user returns.
-    document.addEventListener('visibilitychange', attempt);
-    return () => document.removeEventListener('visibilitychange', attempt);
+    nudge();
+    el.addEventListener('loadeddata', nudge);
+    el.addEventListener('canplay', nudge);
+    document.addEventListener('visibilitychange', nudge);
+
+    // Resume when the hero scrolls back into view, which is when it matters.
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) nudge(); },
+      { threshold: 0.1 },
+    );
+    io.observe(el);
+
+    return () => {
+      el.removeEventListener('loadeddata', nudge);
+      el.removeEventListener('canplay', nudge);
+      document.removeEventListener('visibilitychange', nudge);
+      io.disconnect();
+    };
   }, [videoFailed]);
 
   return (
@@ -195,73 +217,89 @@ export default function Landing() {
 
       {/* ------------------------------------------------------------ hero */}
       <section className="relative min-h-[92vh] flex items-center pt-2xl overflow-hidden">
-        <div className="absolute inset-0" aria-hidden="true">
+        <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
           {/*
-            Video with the still as its poster.
+            The source is 720x1280 — portrait 9:16 — and the hero is a wide
+            landscape band. Stretching it full-bleed meant a ~2x horizontal
+            upscale, which is exactly what read as "blurry", and it cropped
+            away most of the composition.
 
-            object-cover on a fixed-size parent is what keeps the frame sharp:
-            the element is never scaled beyond its native resolution, it is
-            cropped. Scaling a 720p source up to a 1440px viewport is what
-            produces the softness people read as "blurry video".
+            So the video is anchored to the right at full hero height and a
+            width that keeps it DOWNSCALED. At 828px tall, cover needs about
+            466px of width at native scale; the panel is capped near that, so
+            the browser is always shrinking the frame, never enlarging it.
+            Shrinking is lossless to the eye — enlarging is not.
 
-            The poster is the existing hero still, so the section is fully
-            composed on first paint and stays composed if the video is missing,
-            slow, or refused by a data-saver setting.
+            The gradient ramp then dissolves its left edge into the page, so it
+            reads as the hero's background rather than a pasted-in box.
           */}
-          <video
-            ref={videoRef}
-            className="w-full h-full object-cover object-[center_40%]"
-            poster="/img/hero.jpg"
-            autoPlay
-            muted
-            loop
-            playsInline
-            preload="metadata"
-            // Contrast lifts the dusk footage the same way it does the still,
-            // so the two are interchangeable rather than visibly different.
-            style={{ filter: 'contrast(1.12) saturate(1.18) brightness(0.98)' }}
-            onError={() => setVideoFailed(true)}
-          >
-            <source src="/video/hero.mp4" type="video/mp4" />
-          </video>
+          {/*
+            The percentage widths keep the panel proportionate, but a
+            percentage alone grows without limit: at 1920 the panel reached
+            883px and the 720px-wide source was being enlarged 1.23x again, and
+            1.64x at 2560. The absolute cap is what actually holds the promise
+            of "not blurred" — 800px keeps the worst case at ~1.11x, which is
+            below the point where softening is visible, and on wider screens
+            the gradient simply carries further rather than the frame stretching.
+          */}
+          <div className="absolute inset-y-0 right-0 w-full sm:w-[62%] lg:w-[52%] xl:w-[46%] max-w-[800px]">
+            <video
+              ref={videoRef}
+              className="w-full h-full object-cover object-center"
+              poster="/img/hero.jpg"
+              autoPlay
+              muted
+              loop
+              playsInline
+              preload="auto"
+              // Matches the grade applied to the still, so the two are
+              // interchangeable rather than visibly different treatments.
+              style={{ filter: 'contrast(1.06) saturate(1.12) brightness(0.97)' }}
+              onError={() => setVideoFailed(true)}
+            >
+              <source src="/video/hero.mp4" type="video/mp4" />
+            </video>
+          </div>
 
-          {/* Horizontal readability ramp. Solid only under the headline, then
-              falls away fast — past ~62% the footage is untouched, which is
-              what stops the whole hero looking washed out. */}
+          {/*
+            Horizontal dissolve. Opaque across the copy, then falling away so
+            the footage emerges rather than starting at a hard edge. The stop
+            positions are tuned to the panel above: fully clear by ~58%, which
+            is where the video begins on a wide viewport.
+          */}
           <div
             className="absolute inset-0"
             style={{
               background:
-                'linear-gradient(96deg, rgb(var(--background)) 0%, rgb(var(--background) / 0.95) 24%, rgb(var(--background) / 0.70) 40%, rgb(var(--background) / 0.28) 53%, rgb(var(--background) / 0.04) 64%, transparent 74%)',
+                'linear-gradient(94deg, rgb(var(--background)) 0%, rgb(var(--background)) 30%, rgb(var(--background) / 0.92) 42%, rgb(var(--background) / 0.55) 50%, rgb(var(--background) / 0.18) 56%, rgb(var(--background) / 0.02) 62%, transparent 68%)',
             }}
           />
 
           {/* Narrow top fade so the transparent nav stays readable over the
-              bright part of the frame, without lightening the hero itself. */}
+              brighter part of the frame. */}
           <div
             className="absolute inset-x-0 top-0 h-32"
             style={{
               background:
-                'linear-gradient(to bottom, rgb(var(--background) / 0.88) 0%, rgb(var(--background) / 0.45) 45%, transparent 100%)',
+                'linear-gradient(to bottom, rgb(var(--background) / 0.82) 0%, rgb(var(--background) / 0.38) 50%, transparent 100%)',
             }}
           />
 
-          {/* Just enough bottom fade for the stat band to land on calm ground. */}
+          {/* Bottom fade so the stat band lands on calm ground. */}
           <div
             className="absolute inset-0"
             style={{
               background:
-                'linear-gradient(to top, rgb(var(--background)) 0%, rgb(var(--background) / 0.42) 13%, rgb(var(--background) / 0.06) 30%, transparent 46%)',
+                'linear-gradient(to top, rgb(var(--background)) 0%, rgb(var(--background) / 0.45) 12%, rgb(var(--background) / 0.06) 28%, transparent 42%)',
             }}
           />
 
-          {/* Faint brand tint over the exposed half, so the footage belongs to
-              the palette rather than sitting on top of it. */}
+          {/* Faint brand tint over the footage so it belongs to the palette. */}
           <div
-            className="absolute inset-0 mix-blend-soft-light"
+            className="absolute inset-y-0 right-0 w-[62%] mix-blend-soft-light"
             style={{
               background:
-                'linear-gradient(110deg, transparent 45%, rgb(var(--grad-a) / 0.45) 78%, rgb(var(--grad-c) / 0.40) 100%)',
+                'linear-gradient(115deg, transparent 0%, rgb(var(--grad-a) / 0.38) 55%, rgb(var(--grad-c) / 0.34) 100%)',
             }}
           />
         </div>
