@@ -11,6 +11,7 @@ import { extractText, SUPPORTED_EXTENSIONS, shutdownOcr } from './lib/extract.js
 import { parseResume } from './lib/parse.js';
 import { analyze, cosineSimilarity } from './lib/score.js';
 import { ALL_SKILLS, CATEGORIES } from './lib/skills.js';
+import { findTemplate, templatesBySector, ROLE_TEMPLATES } from './lib/role-templates.js';
 import * as store from './lib/store.js';
 import * as gemini from './lib/gemini.js';
 import cookieParser from 'cookie-parser';
@@ -264,7 +265,15 @@ app.get('/api/quota', requireAuth, requireVerified, (req, res) => {
   res.json({ quota: quota.quotaStatus(authed(req).user.id) });
 });
 
-app.get('/api/skills', (_req, res) => {
+/**
+ * The skill library. Behind auth because nothing pre-login needs it: the sign-in
+ * page never reads it, and only the role editor and filter panel do. Left public
+ * it was a 26 KB unauthenticated payload — free bandwidth for anyone, and a
+ * needless disclosure of the full taxonomy and every alias the matcher uses.
+ */
+app.get('/api/skills', requireAuth, requireVerified, (_req, res) => {
+  // Static for the process lifetime, so let the browser keep it.
+  res.setHeader('Cache-Control', 'private, max-age=3600');
   res.json({ skills: ALL_SKILLS, categories: CATEGORIES });
 });
 
@@ -718,6 +727,55 @@ app.post('/api/auth/change-password', requireAuth,
 }));
 
 /* ----------------------------------------------------------------- roles */
+
+/**
+ * The template catalogue. Read-only reference data, behind auth for the same
+ * reason as the skill library: no signed-out page needs it, and publishing the
+ * full set of role definitions serves nobody but a scraper.
+ */
+app.get('/api/role-templates', requireAuth, requireVerified, (_req, res) => {
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.json({ sectors: templatesBySector(), count: ROLE_TEMPLATES.length });
+});
+
+/**
+ * Instantiate a template into the caller's workspace.
+ *
+ * The template id is validated against the fixed catalogue rather than trusted
+ * — it becomes part of a stored record, and an unchecked value here would let a
+ * client invent role content the catalogue never defined.
+ */
+app.post('/api/roles/from-template', requireAuth, requireVerified,
+  principalRateLimit('template', { max: 40, windowMs: 60_000, noun: 'adding roles' }),
+  route(async (req, res) => {
+  const userId = authed(req).user.id;
+  const templateId = v.id(req.body?.templateId, 'templateId');
+
+  const template = findTemplate(templateId);
+  if (!template) return res.status(404).json({ error: 'Unknown role template.' });
+
+  // Never overwrite a role the user already has under this id — saveRole is an
+  // upsert, so reusing the id would silently replace their edited copy along
+  // with the weights they had tuned. Suffix instead.
+  const existing = await store.listRoles(userId);
+  const taken = new Set(existing.map((r) => r.id));
+  let id = template.id;
+  for (let n = 2; taken.has(id) && n < 100; n++) id = `${template.id}-${n}`;
+
+  const role = await store.saveRole(userId, {
+    id,
+    title: taken.has(template.id) ? `${template.title} (copy)` : template.title,
+    department: template.department,
+    description: template.description,
+    required: template.required,
+    minYears: template.minYears,
+    maxYears: template.maxYears,
+    mustHave: template.mustHave,
+  });
+
+  log.info('role added from template', { userId, templateId, roleId: role.id, requestId: req.id });
+  res.status(201).json({ role });
+}));
 
 app.get('/api/roles', requireAuth, requireVerified, route(async (req, res) => {
   res.json({ roles: await store.listRoles(authed(req).user.id) });

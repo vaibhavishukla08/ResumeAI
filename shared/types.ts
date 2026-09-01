@@ -88,6 +88,26 @@ export interface MissingSkill extends RequiredSkill {
   weight: number;
 }
 
+/* -------------------------------------------------------- role templates */
+
+/** Read-only reference role a user can instantiate into their workspace. */
+export interface RoleTemplate {
+  id: string;
+  title: string;
+  department: string;
+  sector: string;
+  minYears: number;
+  maxYears: number | null;
+  description: string;
+  required: string;
+  mustHave: string[];
+}
+
+export interface TemplateSector {
+  sector: string;
+  templates: RoleTemplate[];
+}
+
 /* ------------------------------------------------------------------ roles */
 
 export interface RoleInput {

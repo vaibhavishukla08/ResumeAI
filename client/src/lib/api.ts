@@ -9,6 +9,7 @@ import type {
   Role,
   RoleInput,
   Skill,
+  TemplateSector,
   User,
 } from '@shared/types';
 
@@ -112,6 +113,10 @@ export const api = {
   /* ---- roles ---- */
   roles: () => request<{ roles: Role[] }>('/roles'),
   saveRole: (payload: RoleInput) => send<{ role: Role }>('POST', '/roles', payload),
+  roleTemplates: () =>
+    request<{ sectors: TemplateSector[]; count: number }>('/role-templates'),
+  addRoleFromTemplate: (templateId: string) =>
+    send<{ role: Role }>('POST', '/roles/from-template', { templateId }),
   deleteRole: (id: string) => request<{ ok: boolean }>(`/roles/${id}`, { method: 'DELETE' }),
   rescore: (id: string) => send<{ ok: boolean; updated: number }>('POST', `/roles/${id}/rescore`),
 

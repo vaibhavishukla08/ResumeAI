@@ -26,6 +26,29 @@ fully offline. The **first account you register becomes the admin**.
 
 ---
 
+## Role library
+
+Sixty-five ready-made roles across thirteen sectors — Technology, Healthcare,
+Finance, Legal, Marketing, Sales, HR, Operations, Design, Project Management,
+Education, Trades and Administration — searchable by title, department or skill.
+
+They are **templates, not seeded rows**. Every new account gets six starter
+roles; dropping sixty-five into each workspace would bury the ones a recruiter
+actually opened and copy the same rows into storage once per user. The catalogue
+lives in code and is read-only; adding one copies it into your workspace, where
+it is editable like any other role.
+
+Adding a template you already have creates a suffixed copy rather than
+overwriting — `saveRole` is an upsert, so reusing the id would silently replace
+an edited role along with its tuned weights. Verified: editing a role then
+re-adding its template leaves the edit intact and creates `role-2` beside it.
+
+All 435 skill references across the catalogue resolve to library skills, and
+every `mustHave` entry appears in its own role's requirement list — both checked
+programmatically rather than by eye.
+
+---
+
 ## Any profession, not just tech
 
 The scoring engine was always domain-agnostic — it matches required skills

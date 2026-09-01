@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import type { RoleInput, Role } from '@shared/types';
+import { useEffect, useMemo, useState } from 'react';
+import type { RoleInput, Role, TemplateSector } from '@shared/types';
 import { api } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
 import type { Workspace } from '@/App';
@@ -27,6 +27,60 @@ export default function Roles({
   const [editing, setEditing] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const { push } = useToast();
+
+  const [browsing, setBrowsing] = useState(false);
+  const [sectors, setSectors] = useState<TemplateSector[]>([]);
+  const [templateCount, setTemplateCount] = useState(0);
+  const [sectorFilter, setSectorFilter] = useState<string>('all');
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [adding, setAdding] = useState<string | null>(null);
+
+  // Fetched once when the catalogue is first opened, not on mount: most visits
+  // to this page are to edit an existing role, and the payload is reference
+  // data that never changes within a session.
+  useEffect(() => {
+    if (!browsing || sectors.length) return;
+    api
+      .roleTemplates()
+      .then((r) => { setSectors(r.sectors); setTemplateCount(r.count); })
+      .catch((err: Error) => push(err.message, 'error'));
+  }, [browsing, sectors.length, push]);
+
+  const visibleTemplates = useMemo(() => {
+    const q = templateSearch.trim().toLowerCase();
+    return sectors
+      .filter((g) => sectorFilter === 'all' || g.sector === sectorFilter)
+      .map((g) => ({
+        ...g,
+        templates: g.templates.filter(
+          (t) =>
+            !q ||
+            t.title.toLowerCase().includes(q) ||
+            t.department.toLowerCase().includes(q) ||
+            t.required.toLowerCase().includes(q),
+        ),
+      }))
+      .filter((g) => g.templates.length > 0);
+  }, [sectors, sectorFilter, templateSearch]);
+
+  const alreadyAdded = useMemo(
+    () => new Set(roles.map((r) => r.title.toLowerCase())),
+    [roles],
+  );
+
+  async function addTemplate(templateId: string, title: string) {
+    setAdding(templateId);
+    try {
+      const { role } = await api.addRoleFromTemplate(templateId);
+      await refreshRoles();
+      push(`Added "${role.title}".`, 'success');
+    } catch (err) {
+      push((err as Error).message, 'error');
+    } finally {
+      setAdding(null);
+    }
+    void title;
+  }
 
   const startEdit = (role: Role) =>
     setEditing({
@@ -131,11 +185,166 @@ export default function Roles({
             Each role defines the requirements every resume is scored against.
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setEditing({ ...BLANK })}>
-          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>add</span>
-          New role
-        </button>
+        <div className="flex items-center gap-sm">
+          <button
+            className={`btn-ghost ${browsing ? 'border-primary/60 text-primary' : ''}`}
+            onClick={() => setBrowsing((v) => !v)}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>library_books</span>
+            Browse templates
+            <span
+              className="material-symbols-outlined transition-transform duration-300"
+              style={{ fontSize: 16, transform: browsing ? 'rotate(180deg)' : 'none' }}
+            >
+              expand_more
+            </span>
+          </button>
+          <button className="btn-primary" onClick={() => setEditing({ ...BLANK })}>
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>add</span>
+            New role
+          </button>
+        </div>
       </header>
+
+      {browsing && (
+        <section className="panel p-lg animate-slide-down">
+          <div className="flex items-end justify-between gap-md flex-wrap mb-md">
+            <div>
+              <h2 className="font-heading text-headline-md">Role library</h2>
+              <p className="font-body text-body-sm text-on-surface-variant mt-xs">
+                {templateCount || '…'} ready-made roles across tech, healthcare, finance,
+                legal, trades and more. Adding one copies it into your workspace, where you
+                can edit it like any other role.
+              </p>
+            </div>
+            <div className="flex items-center gap-sm flex-wrap">
+              <div className="relative">
+                <span
+                  className="material-symbols-outlined absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant"
+                  style={{ fontSize: 18 }}
+                >
+                  search
+                </span>
+                <input
+                  className="field pl-[38px] py-xs w-56"
+                  placeholder="Search roles or skills…"
+                  value={templateSearch}
+                  onChange={(e) => setTemplateSearch(e.target.value)}
+                />
+              </div>
+              <select
+                className="field py-xs cursor-pointer w-44"
+                value={sectorFilter}
+                onChange={(e) => setSectorFilter(e.target.value)}
+              >
+                <option value="all">All sectors</option>
+                {sectors.map((g) => (
+                  <option key={g.sector} value={g.sector}>{g.sector}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {!sectors.length && (
+            <div className="space-y-sm">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="skeleton h-20" />
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-lg max-h-[560px] overflow-y-auto pr-xs">
+            {visibleTemplates.map((group) => (
+              <div key={group.sector}>
+                <p className="label-eyebrow mb-sm sticky top-0 bg-surface-container py-xs z-10">
+                  {group.sector} · {group.templates.length}
+                </p>
+                <div className="grid md:grid-cols-2 gap-sm">
+                  {group.templates.map((t) => {
+                    const added = alreadyAdded.has(t.title.toLowerCase());
+                    return (
+                      <article
+                        key={t.id}
+                        className="panel p-md flex flex-col gap-sm hover-lift"
+                      >
+                        <div className="flex items-start justify-between gap-sm">
+                          <div className="min-w-0">
+                            <h3 className="font-body text-body-md font-semibold text-on-surface truncate">
+                              {t.title}
+                            </h3>
+                            <p className="font-body text-label-md text-on-surface-variant mt-xs">
+                              {t.department} · {t.minYears}
+                              {t.maxYears ? `–${t.maxYears}` : '+'}y
+                            </p>
+                          </div>
+                          <button
+                            className={added ? 'btn-ghost flex-shrink-0' : 'btn-primary flex-shrink-0'}
+                            onClick={() => addTemplate(t.id, t.title)}
+                            disabled={adding === t.id}
+                            title={added ? 'You already have a role with this title — this adds a copy' : undefined}
+                          >
+                            {adding === t.id ? (
+                              <span className="material-symbols-outlined animate-spin" style={{ fontSize: 17 }}>
+                                progress_activity
+                              </span>
+                            ) : (
+                              <span className="material-symbols-outlined" style={{ fontSize: 17 }}>
+                                {added ? 'library_add_check' : 'add'}
+                              </span>
+                            )}
+                            {added ? 'Added' : 'Add'}
+                          </button>
+                        </div>
+
+                        <p className="font-body text-body-sm text-on-surface-variant line-clamp-2">
+                          {t.description}
+                        </p>
+
+                        <div className="flex flex-wrap gap-xs">
+                          {t.required.split(',').slice(0, 5).map((skill) => {
+                            const label = skill.trim();
+                            const must = t.mustHave.some(
+                              (m) => m.toLowerCase() === label.toLowerCase(),
+                            );
+                            return (
+                              <span
+                                key={label}
+                                className={`chip ${
+                                  must
+                                    ? 'bg-primary/12 border-primary/35 text-primary font-semibold'
+                                    : 'bg-surface-container-high border-outline-variant text-on-surface-variant'
+                                }`}
+                              >
+                                {must && (
+                                  <span className="material-symbols-outlined filled" style={{ fontSize: 12 }}>
+                                    priority_high
+                                  </span>
+                                )}
+                                {label}
+                              </span>
+                            );
+                          })}
+                          {t.required.split(',').length > 5 && (
+                            <span className="chip bg-surface-container-high border-outline-variant text-on-surface-variant">
+                              +{t.required.split(',').length - 5}
+                            </span>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            {sectors.length > 0 && !visibleTemplates.length && (
+              <p className="font-body text-body-sm text-on-surface-variant text-center py-lg">
+                No templates match that search.
+              </p>
+            )}
+          </div>
+        </section>
+      )}
 
       {editing && (
         <section className="panel gradient-border p-lg animate-slide-down">
