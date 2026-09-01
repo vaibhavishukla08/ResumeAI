@@ -33,3 +33,5 @@ service-account*.json
 
 # Security log, if SECURITY_LOG_FILE points inside the repo.
 *.security.log
+# Sample resume data — contains real names, don't publish.
+samples/

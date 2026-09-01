@@ -11,6 +11,9 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const spawnInfo = process.platform === 'win32'
+  ? { command: 'cmd.exe', args: [' /d', '/s', '/c', 'npm'] }
+  : { command: npm, args: [] };
 
 // Each child gets its port pinned explicitly. Without this, a PORT inherited
 // from the parent environment would be picked up by BOTH the API and Vite, and
@@ -42,7 +45,12 @@ const children = [];
 let shuttingDown = false;
 
 for (const target of TARGETS) {
-  const child = spawn(npm, target.args, {
+  const command = process.platform === 'win32' ? 'cmd.exe' : npm;
+  const args = process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'npm', ...target.args]
+    : target.args;
+
+  const child = spawn(command, args, {
     cwd: target.cwd,
     shell: false,
     env: { ...process.env, ...target.env },
