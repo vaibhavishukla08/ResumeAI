@@ -93,6 +93,10 @@ app.use(requestId);
 app.use(requireHttps);
 app.use(securityHeaders);
 
+const CLIENT_DIST = path.resolve(__dirname, '../../../../client/dist');
+
+app.use(express.static(CLIENT_DIST));
+
 // Credentials must be allowed for cookie auth, and that forbids a wildcard
 // origin — so the allowed origin is explicit.
 app.use(cors({ origin: APP_URL, credentials: true }));
@@ -1339,6 +1343,10 @@ const sessionSweeper = setInterval(() => {
   });
 }, 60 * 60 * 1000);
 sessionSweeper.unref();
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+});
 
 const server = app.listen(PORT, BIND_HOST, () => {
   const g = gemini.geminiStatus();
