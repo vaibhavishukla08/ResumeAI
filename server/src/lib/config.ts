@@ -103,9 +103,33 @@ export const PORT = Number(process.env.PORT) || 5174;
  * "internal" services end up on the public internet.
  */
 export const BIND_HOST: string =
-  process.env.BIND_HOST || (isProduction ? '127.0.0.1' : '0.0.0.0');
+process.env.BIND_HOST || (isProduction ? '127.0.0.1' : '0.0.0.0');
 
-export const TRUST_PROXY = process.env.TRUST_PROXY?.trim() || '';
+
+/**
+ * How many proxies sit in front of us, normalised for Express.
+ *
+ * Express accepts a hop count, `false`, or a list of proxy addresses — and it
+ * treats *any* string it is given as an address list. So `TRUST_PROXY=1`, the
+ * value every hosting dashboard invites you to type, used to compile to the
+ * address 0.0.0.1: it matches no proxy, so the header is never trusted, and
+ * nothing says so. The symptoms show up far from the cause — every client
+ * shares one rate-limit bucket, the audit log records the proxy's IP, and
+ * `req.secure` is false, which makes HTTPS enforcement redirect in a loop.
+ */
+const rawTrustProxy = process.env.TRUST_PROXY?.trim() ?? '';
+
+export const TRUST_PROXY: number | boolean | string = (() => {
+  if (!rawTrustProxy || rawTrustProxy === 'false' || rawTrustProxy === 'off') return false;
+  if (rawTrustProxy === 'true' || rawTrustProxy === 'on') return 1;
+  // "1", "2" — hop counts, the common case behind a single load balancer.
+  if (/^\d+$/.test(rawTrustProxy)) return Number(rawTrustProxy);
+  // Anything else is taken at face value as an address or subnet list.
+  return rawTrustProxy;
+})();
+
+/** Whether any proxy is trusted at all, for code that only needs the boolean. */
+export const TRUST_PROXY_ENABLED = TRUST_PROXY !== false;
 
 /** HTTPS is mandatory in production unless explicitly, knowingly disabled. */
 export const ENFORCE_HTTPS =
@@ -121,6 +145,27 @@ export const LOG_LEVEL = (process.env.LOG_LEVEL || (isProduction ? 'info' : 'deb
 /** Where security events are appended, in addition to stdout. */
 export const SECURITY_LOG_FILE = process.env.SECURITY_LOG_FILE || '';
 
+/* ----------------------------------------------------------- sign-in modes */
+
+/**
+ * Google SSO is off unless an operator asks for it twice: a client id *and*
+ * this flag. The verification path in auth.ts is unchanged and still correct,
+ * but a stale GOOGLE_CLIENT_ID left behind in an .env can no longer put the
+ * button back on the sign-in page on its own.
+ */
+export const GOOGLE_LOGIN_ENABLED =
+  process.env.GOOGLE_LOGIN?.trim() === 'on' && Boolean(process.env.GOOGLE_CLIENT_ID?.trim());
+
+/**
+ * One shared, already-verified workspace that anyone can open with a single
+ * click, so the app can be shown without an inbox round trip. Set
+ * DEMO_LOGIN=false to remove the button and the route together.
+ */
+export const DEMO_LOGIN_ENABLED = process.env.DEMO_LOGIN?.trim() !== 'false';
+
+/** Identity of that workspace. Never receives mail — nothing is sent to it. */
+export const DEMO_EMAIL = (process.env.DEMO_EMAIL?.trim() || 'demo@resumeai.local').toLowerCase();
+
 /* ------------------------------------------------------ consistency rules */
 
 if (isProduction) {
@@ -131,7 +176,7 @@ if (isProduction) {
       fatal: true,
     });
   }
-  if (!TRUST_PROXY && APP_URL.startsWith('https://')) {
+  if (!TRUST_PROXY_ENABLED && APP_URL.startsWith('https://')) {
     problems.push({
       key: 'TRUST_PROXY',
       message:
@@ -174,10 +219,15 @@ export function describe(): Record<string, string | number | boolean> {
     bind: `${BIND_HOST}:${PORT}`,
     appUrl: APP_URL,
     httpsEnforced: ENFORCE_HTTPS,
-    trustProxy: TRUST_PROXY || 'off',
+    trustProxy: TRUST_PROXY_ENABLED ? `trusting ${TRUST_PROXY}` : 'off',
     sessionSecretConfigured: rawSessionSecret ? 'yes' : 'no — generated per boot (development only)',
     geminiKey: process.env.GEMINI_API_KEY ? 'set' : 'not set',
-    googleClientId: process.env.GOOGLE_CLIENT_ID ? 'set' : 'not set',
+    googleLogin: GOOGLE_LOGIN_ENABLED
+      ? 'enabled'
+      : process.env.GOOGLE_CLIENT_ID
+        ? 'disabled (client id present; set GOOGLE_LOGIN=on to enable)'
+        : 'disabled (no client id)',
+    demoLogin: DEMO_LOGIN_ENABLED ? `enabled as ${DEMO_EMAIL}` : 'disabled',
     mailWebhook: process.env.MAIL_WEBHOOK_URL ? 'set' : 'not set (links go to the log)',
     logLevel: LOG_LEVEL,
   };

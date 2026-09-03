@@ -25,6 +25,8 @@ interface AuthContextValue {
     website_url?: string;
   }) => Promise<string>;
   loginWithGoogle: (credential: string) => Promise<void>;
+  /** Sign in to the shared demo workspace. */
+  loginAsDemo: () => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -76,6 +78,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(next);
   }, []);
 
+  const loginAsDemo = useCallback(async () => {
+    const { user: next } = await api.demo();
+    setUser(next);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       // Server-side revocation is the part that matters; clearing local state
@@ -98,8 +105,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, booting, login, register, loginWithGoogle, logout, refresh }),
-    [user, booting, login, register, loginWithGoogle, logout, refresh],
+    () => ({ user, booting, login, register, loginWithGoogle, loginAsDemo, logout, refresh }),
+    [user, booting, login, register, loginWithGoogle, loginAsDemo, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

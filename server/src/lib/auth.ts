@@ -24,6 +24,7 @@ import * as sessions from './sessions.js';
 import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE } from './sessions.js';
 import { safeEqual } from './tokens.js';
 import { recordAuthEvent } from './audit.js';
+import { DEMO_EMAIL, GOOGLE_LOGIN_ENABLED } from './config.js';
 
 const BCRYPT_ROUNDS = 12;
 const isProduction = process.env.NODE_ENV === 'production';
@@ -56,15 +57,25 @@ if (isProduction) {
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID?.replace(/^["']|["']$/g, '') ?? '';
 
+/**
+ * Google sign-in is switched off in this build — the sign-in page offers
+ * email + password and the demo workspace instead. The flow below is intact
+ * and stays correct; GOOGLE_LOGIN=on with a client id configured brings it
+ * back, and everything downstream (the button, the route, the account
+ * linking) follows from this one predicate.
+ */
 export function googleEnabled(): boolean {
-  return Boolean(GOOGLE_CLIENT_ID);
+  return GOOGLE_LOGIN_ENABLED && Boolean(GOOGLE_CLIENT_ID);
 }
 
 export function googleStatus(): { enabled: boolean; clientId: string | null } {
   // The client ID is public by design — the browser needs it to render the
   // button, and Google treats it as public. The client *secret* is not used by
-  // this flow and must never be sent here.
-  return { enabled: googleEnabled(), clientId: GOOGLE_CLIENT_ID || null };
+  // this flow and must never be sent here. While the feature is off we withhold
+  // even the ID, so the browser never loads Google's script at all.
+  return googleEnabled()
+    ? { enabled: true, clientId: GOOGLE_CLIENT_ID }
+    : { enabled: false, clientId: null };
 }
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -105,6 +116,71 @@ export async function verifyGoogleToken(credential: string): Promise<GoogleProfi
     console.warn('[auth] Google token verification failed:', (err as Error).message);
     return null;
   }
+}
+
+/* ------------------------------------------------------------ demo access */
+
+/** Raised when DEMO_EMAIL names an account that is not the demo workspace. */
+export class DemoAddressTaken extends Error {
+  constructor() {
+    super('The configured demo address belongs to a real account.');
+    this.name = 'DemoAddressTaken';
+  }
+}
+
+/**
+ * Resolve the shared demo workspace, creating it the first time someone asks.
+ *
+ * Every visitor who takes the demo lands in the *same* account, so the roles
+ * and resumes one of them uploads are visible to the next. That is the point
+ * — the demo is meant to look lived-in — but it is also the reason the UI
+ * says plainly that nothing private belongs here.
+ *
+ * Two properties keep the blast radius small. The account is always a
+ * recruiter, never the admin that the first registration on a fresh
+ * deployment would become. And it carries no password hash, so the well-known
+ * address cannot be driven through the password form, the reset flow, or a
+ * lockout attack against a real user's session — the only way in is the demo
+ * route, which is rate limited like any other sign-in.
+ */
+async function resolveDemoUser(): Promise<StoredUser> {
+  const existing = await store.findUserByEmail(DEMO_EMAIL);
+  if (existing) {
+    // A real account sitting on the demo address would turn this button into a
+    // way into someone's workspace. Registration refuses the address, so this
+    // only fires for a deployment whose DEMO_EMAIL was pointed at an existing
+    // account — refuse rather than hand out a session for it.
+    if (existing.provider !== 'demo') throw new DemoAddressTaken();
+    return existing;
+  }
+
+  const user: StoredUser = {
+    id: store.newId(),
+    email: DEMO_EMAIL,
+    name: 'Demo User',
+    company: 'ResumeAI Demo',
+    role: 'recruiter',
+    provider: 'demo',
+    // There is no inbox to confirm; the address is ours and the data routes
+    // are gated on this being true.
+    emailVerified: true,
+    createdAt: new Date().toISOString(),
+  };
+
+  await store.createUser(user);
+  return user;
+}
+
+/** In-flight creation, so two simultaneous first clicks mint one workspace. */
+let demoPending: Promise<StoredUser> | null = null;
+
+export function ensureDemoUser(): Promise<StoredUser> {
+  if (!demoPending) {
+    demoPending = resolveDemoUser();
+    // Clear the latch either way: a failed attempt must not poison the next.
+    void demoPending.catch(() => {}).then(() => { demoPending = null; });
+  }
+  return demoPending;
 }
 
 /* --------------------------------------------------------------- secrets */

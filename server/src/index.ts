@@ -17,8 +17,11 @@ import * as gemini from './lib/gemini.js';
 import cookieParser from 'cookie-parser';
 import {
   clearFailedLogins,
+  DemoAddressTaken,
   endSession,
+  ensureDemoUser,
   fakeVerify,
+  googleEnabled,
   googleStatus,
   hashPassword,
   isLocked,
@@ -50,7 +53,8 @@ import * as mailer from './lib/mailer.js';
 import { clearSessionCookies, ensureCsrfCookie, isSessionExpired } from './lib/sessions.js';
 import * as v from './lib/validate.js';
 import {
-  APP_URL, BIND_HOST, MAX_FILE_MB, PORT, TRUST_PROXY,
+  APP_URL, BIND_HOST, DEMO_EMAIL, DEMO_LOGIN_ENABLED, MAX_FILE_MB, PORT,
+  TRUST_PROXY, TRUST_PROXY_ENABLED,
   describe as describeConfig, reportConfig,
 } from './lib/config.js';
 import { closeLogger, log } from './lib/logger.js';
@@ -83,8 +87,9 @@ const app = express();
 // unless we trust the forwarding header, which would put every user in one
 // bucket. Only trust it when explicitly told to — trusting it blindly lets a
 // client spoof X-Forwarded-For and evade the limiter entirely.
-if (TRUST_PROXY) {
-  app.set('trust proxy', TRUST_PROXY === 'true' ? 1 : TRUST_PROXY);
+if (TRUST_PROXY_ENABLED) {
+  // Already normalised to something Express understands — see config.ts.
+  app.set('trust proxy', TRUST_PROXY);
 }
 // Never advertise the framework; it only helps someone pick an exploit.
 app.disable('x-powered-by');
@@ -227,8 +232,9 @@ const ctx = (req: Request, extra: Record<string, unknown> = {}) => ({
 /**
  * Health and capability discovery.
  *
- * The Google client ID has to be readable before sign-in — the button cannot
- * render without it, and Google treats it as public. Everything else is
+ * Which sign-in methods this deployment offers has to be readable before
+ * sign-in — the page cannot decide what to render otherwise, and the Google
+ * client ID is public by design when that method is on. Everything else is
  * infrastructure detail: which models are configured, and whether an AI key is
  * present at all. That is free reconnaissance for an attacker and of no use to
  * an anonymous visitor, so it is only included once a session is resolved.
@@ -239,6 +245,7 @@ app.get('/api/health', optionalAuth, (req, res) => {
   res.json({
     ok: true,
     google: googleStatus(),
+    demo: { enabled: DEMO_LOGIN_ENABLED },
     maxFileMb: MAX_FILE_MB,
     supported: SUPPORTED_EXTENSIONS,
     gemini: signedIn
@@ -320,6 +327,12 @@ app.post('/api/auth/register', ipRateLimit('register', REGISTER_LIMIT), route(as
   if (!strength.ok) return res.status(400).json({ error: strength.error });
 
   const address = normaliseEmail(String(email));
+
+  // The demo workspace is signed into by button, not by password. Letting a
+  // signup claim its address would put a visitor into a stranger's account.
+  if (DEMO_LOGIN_ENABLED && address === DEMO_EMAIL) {
+    return res.status(202).json(REGISTER_ACCEPTED);
+  }
 
   if (abuse.isDisposableEmail(address)) {
     return res.status(400).json({
@@ -457,6 +470,12 @@ app.post('/api/auth/login', ipRateLimit('login', LOGIN_IP_LIMIT), route(async (r
  * link it to the existing account with that email or create a new workspace.
  */
 app.post('/api/auth/google', ipRateLimit('google', LOGIN_IP_LIMIT), route(async (req, res) => {
+  // Off by default in this build. Answering 404 rather than failing the token
+  // check keeps the disabled case honest instead of looking like an outage.
+  if (!googleEnabled()) {
+    return res.status(404).json({ error: 'Google sign-in is not available on this deployment.' });
+  }
+
   const credential = req.body?.credential;
   if (typeof credential !== 'string' || !credential) {
     return res.status(400).json({ error: 'Missing Google credential.' });
@@ -506,6 +525,35 @@ app.post('/api/auth/google', ipRateLimit('google', LOGIN_IP_LIMIT), route(async 
   await startSession(res, user, req);
   recordAuthEvent('login.google', ctx(req, { email: user.email, userId: user.id, detail: 'new account' }));
   res.status(201).json({ user: publicUser(user) });
+}));
+
+/**
+ * Demo sign-in. One click, no address to confirm, straight into a shared
+ * workspace that already has the starter roles.
+ *
+ * It is a real session on a real account — the same cookie, the same CSRF
+ * pairing, the same rate limit as a password login — so nothing downstream
+ * needs a special case for it. What it is not is a back door: the account it
+ * opens is a recruiter with no password, holding only whatever visitors have
+ * put there.
+ */
+app.post('/api/auth/demo', ipRateLimit('demo', LOGIN_IP_LIMIT), route(async (req, res) => {
+  if (!DEMO_LOGIN_ENABLED) {
+    return res.status(404).json({ error: 'Demo sign-in is not available on this deployment.' });
+  }
+
+  let user: StoredUser;
+  try {
+    user = await ensureDemoUser();
+  } catch (err) {
+    if (!(err instanceof DemoAddressTaken)) throw err;
+    log.error('demo sign-in is configured against a real account', { requestId: req.id });
+    return res.status(503).json({ error: 'Demo sign-in is misconfigured on this deployment.' });
+  }
+
+  await startSession(res, user, req);
+  recordAuthEvent('login.demo', ctx(req, { email: user.email, userId: user.id }));
+  res.json({ user: publicUser(user) });
 }));
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
@@ -706,7 +754,9 @@ app.post('/api/auth/change-password', requireAuth,
 
   if (!user.passwordHash) {
     return res.status(409).json({
-      error: 'This account signs in with Google and has no password to change.',
+      error: user.provider === 'demo'
+        ? 'The demo account has no password to change.'
+        : 'This account signs in with Google and has no password to change.',
     });
   }
   if (typeof currentPassword !== 'string' || !(await verifyPassword(currentPassword, user.passwordHash))) {

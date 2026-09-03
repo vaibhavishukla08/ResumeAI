@@ -8,8 +8,11 @@
 
 export type UserRole = 'admin' | 'recruiter';
 
-/** How the account authenticates. Google accounts have no local password. */
-export type AuthProvider = 'password' | 'google';
+/**
+ * How the account authenticates. Neither Google nor demo accounts have a local
+ * password, so anything that offers to change one must check this first.
+ */
+export type AuthProvider = 'password' | 'google' | 'demo';
 
 export interface User {
   id: string;
@@ -304,10 +307,18 @@ export interface HealthResponse {
     reasonModel: string;
     embedModel: string;
   };
-  /** The client hides the Google button entirely when this is not configured. */
+  /**
+   * The client hides the Google button entirely when this is not enabled, and
+   * the id is withheld while it is off, so the browser never loads Google's
+   * script.
+   */
   google: {
     enabled: boolean;
     clientId: string | null;
+  };
+  /** One-click sign-in to the shared demo workspace. */
+  demo: {
+    enabled: boolean;
   };
   maxFileMb: number;
   supported: string[];

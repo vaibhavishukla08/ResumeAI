@@ -88,6 +88,8 @@ export const api = {
   login: (payload: { email: string; password: string }) =>
     send<AuthResponse>('POST', '/auth/login', payload),
   google: (credential: string) => send<AuthResponse>('POST', '/auth/google', { credential }),
+  /** One click into the shared demo workspace; no credential to send. */
+  demo: () => send<AuthResponse>('POST', '/auth/demo'),
   me: () => request<{ user: User }>('/auth/me'),
   logout: () => send<{ ok: true }>('POST', '/auth/logout'),
   logoutAll: () => send<{ ok: true; revoked: number }>('POST', '/auth/logout-all'),

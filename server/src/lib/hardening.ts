@@ -5,7 +5,9 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import { APP_URL, ENFORCE_HTTPS, HSTS_MAX_AGE, TRUST_PROXY } from './config.js';
+import {
+  APP_URL, ENFORCE_HTTPS, GOOGLE_LOGIN_ENABLED, HSTS_MAX_AGE, TRUST_PROXY_ENABLED,
+} from './config.js';
 import { log } from './logger.js';
 
 /* ------------------------------------------------------------- request id */
@@ -48,7 +50,9 @@ export function requireHttps(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
-  const secure = TRUST_PROXY ? req.secure : (req.socket as { encrypted?: boolean }).encrypted === true;
+  const secure = TRUST_PROXY_ENABLED
+    ? req.secure
+    : (req.socket as { encrypted?: boolean }).encrypted === true;
   if (secure) {
     next();
     return;
@@ -101,14 +105,27 @@ export function securityHeaders(_req: Request, res: Response, next: NextFunction
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      // The SPA ships hashed assets; Google Identity Services is loaded on demand.
-      "script-src 'self' https://accounts.google.com/gsi/client",
-      "frame-src https://accounts.google.com",
-      "connect-src 'self' https://accounts.google.com",
+      // The SPA ships hashed assets. Google Identity Services is loaded on
+      // demand — and only while Google sign-in is switched on, so a deployment
+      // that does not use it does not carry a standing allowance to run
+      // third-party script, frame a third-party origin, or talk to one.
+      ...(GOOGLE_LOGIN_ENABLED
+        ? [
+            "script-src 'self' https://accounts.google.com/gsi/client",
+            "frame-src https://accounts.google.com",
+            "connect-src 'self' https://accounts.google.com",
+            // Avatars come back from Google's CDN on those accounts.
+            "img-src 'self' data: blob: https://lh3.googleusercontent.com",
+          ]
+        : [
+            "script-src 'self'",
+            "frame-src 'none'",
+            "connect-src 'self'",
+            "img-src 'self' data: blob:",
+          ]),
       // Tailwind emits an inline style attribute surface; fonts come from Google.
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
-      "img-src 'self' data: blob: https://lh3.googleusercontent.com",
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
