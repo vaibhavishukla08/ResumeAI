@@ -9,6 +9,7 @@ The interface is rooted in the Stitch project *Resume Insight Analyzer* — its 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Signing In](#signing-in)
 - [The Three Scores](#the-three-scores)
 - [Role Library](#role-library)
 - [Any Profession, Not Just Tech](#any-profession-not-just-tech)
@@ -32,9 +33,28 @@ The interface is rooted in the Stitch project *Resume Insight Analyzer* — its 
 npm run install:all && npm run dev
 ```
 
-Then open **http://localhost:5173** and create an account. The API runs on `5174`; Vite proxies `/api` to it, so there is no CORS step. The first account you register becomes the admin.
+Then open **http://localhost:5173**. The fastest way in is **Explore the demo workspace** — one click, no address to confirm. To get your own workspace instead, create an account; the first account registered becomes the admin.
+
+The API runs on `5174`; Vite proxies `/api` to it, so there is no CORS step.
 
 No API key is required — the app ships with a deterministic analysis engine and works fully offline.
+
+---
+
+## Signing In
+
+Three ways in, and which ones appear is decided by the server and reported at `/api/health` — the sign-in page renders what the deployment actually offers rather than guessing.
+
+### Demo workspace *(on by default)*
+One button opens a single shared, pre-verified workspace, so the app can be shown without an inbox round trip. It is an ordinary session — the same cookie, the same CSRF pairing, the same per-IP limit as a password login — so nothing downstream treats it as a special case, and it arrives with the six starter roles already in place.
+
+Everyone who clicks it lands in the **same** account and sees what the last visitor uploaded. That is what makes a demo look lived-in, and it is why the button says so plainly and why nothing private belongs there. Set `DEMO_LOGIN=false` to remove the button and the route together; `DEMO_EMAIL` renames the account (default `demo@resumeai.local`, which never receives mail).
+
+### Email and password
+The full path: registration creates the account but grants no session, and data routes stay closed until the emailed link is followed. **Without `MAIL_WEBHOOK_URL` configured, that link is only printed to the server log** — fine for development, but it means a stranger cannot complete a signup on a deployment that has no mail provider. Configure mail before real users exist, or leave the demo button as the way in.
+
+### Google Sign-In *(off by default)*
+Hidden unless a deployment opts in — see [Optional Integrations](#google-sign-in). While it is off, the client ID is withheld from `/api/health` so the browser never loads Google's script, `POST /api/auth/google` answers 404 rather than failing a token check, and the CSP carries no allowance for `accounts.google.com` at all.
 
 ---
 
@@ -147,14 +167,16 @@ New accounts are seeded with six starter roles spanning nursing, finance, market
 ## Optional Integrations
 
 ### Google Sign-In
-Leave it unset and the button is hidden entirely — email and password still work.
+**Off by default.** Enabling it takes two deliberate steps, not one — a client ID alone does nothing. A stale `GOOGLE_CLIENT_ID` left behind in an `.env` therefore cannot quietly put the button back on the sign-in page:
 
 1. [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials)
 2. Create Credentials → OAuth client ID → Web application
 3. Authorised JavaScript origins: `http://localhost:5173` (plus your production origin)
-4. Put the Client ID in `server/.env` as `GOOGLE_CLIENT_ID` and restart
+4. Put the Client ID in `server/.env` as `GOOGLE_CLIENT_ID`, add `GOOGLE_LOGIN=on`, and restart
 
 The client secret is not used by this flow and should not be added.
+
+Everything follows from that one predicate — the button, the route, the CSP allowance, and the client ID in `/api/health` all appear and disappear together, so there is no state where one of them is on and another is off. The verification path itself is untouched while the feature is off; turning it back on is a configuration change, not a code change.
 
 ### Gemini
 Everything above works without a key. Adding one upgrades three things: LLM structured extraction, written recommendations with interview questions, and vision-based OCR for scans.
@@ -179,7 +201,10 @@ shared/
 
 server/                          (Express + TypeScript, run with tsx)
   src/index.ts        Routes, auth guards, upload pipeline
-  src/lib/auth.ts     hashing, guards, lockout, validation, Google verify
+  src/lib/auth.ts     hashing, guards, lockout, validation, demo workspace,
+                       Google verify
+  src/lib/config.ts   Env resolved once at boot — secrets validated, sign-in
+                       methods decided, fatal problems refuse to start
   src/lib/sessions.ts Opaque server-side sessions and cookie handling
   src/lib/tokens.ts   Single-use hashed tokens for verification and reset
   src/lib/ratelimit.ts Per-IP and per-account limiting
@@ -212,7 +237,8 @@ Typecheck both sides with `npm run typecheck`.
 |---|---|---|
 | POST | `/api/auth/register` | Create an account; sends a confirmation email |
 | POST | `/api/auth/login` | Sign in; sets the session cookie |
-| POST | `/api/auth/google` | Exchange a Google ID token for a session |
+| POST | `/api/auth/demo` | Open the shared demo workspace; 404 when `DEMO_LOGIN=false` |
+| POST | `/api/auth/google` | Exchange a Google ID token for a session; 404 unless Google is enabled |
 | POST | `/api/auth/logout` | Revoke this session |
 | POST | `/api/auth/logout-all` | Revoke every session for the account |
 | GET | `/api/auth/sessions` | List active sessions |
@@ -222,7 +248,7 @@ Typecheck both sides with `npm run typecheck`.
 | POST | `/api/auth/reset-password` | Set a new password from a reset token |
 | POST | `/api/auth/change-password` | Change password while signed in |
 | GET | `/api/auth/me` | Current authenticated user from the session |
-| GET | `/api/health` | Engine status, limits, accepted formats |
+| GET | `/api/health` | Available sign-in methods, engine status, limits, accepted formats |
 | GET | `/api/roles` | List roles with hydrated skill requirements |
 | POST | `/api/roles` | Create or update a role |
 | POST | `/api/roles/:id/rescore` | Re-score every candidate after requirements change |
@@ -246,7 +272,8 @@ Sessions are server-side and opaque. The credential is a 256-bit random value in
 - **Rate limiting** runs in two independent layers: per-IP (10 logins / 15 min, 5 registrations or resets / hour) and per-account (5 consecutive failures → 15-minute lockout). The second stops a distributed attack that rotates IPs against one inbox — the first alone would not.
 - **No user enumeration.** Registering an address that already exists returns the same body and status as a fresh signup, and mails the real owner instead. `forgot-password` always answers identically. Login runs a dummy bcrypt compare when no account matches, so a miss costs the same as a wrong password — measured at 457 ms vs 463 ms, against roughly 1 ms vs 460 ms before.
 - **CSRF** uses a double-submit token. `SameSite=Lax` already blocks cross-site POSTs, but `/api/analyze` is `multipart/form-data` — a "simple" content type a cross-origin form can submit without a preflight — so the header check is what actually closes that path. Anonymous callers are issued a token so login itself is protected, and it rotates on sign-in to defeat session fixation.
-- **Google Sign-In** verifies the ID token against Google's signing keys (`google-auth-library`) — signature, issuer, audience, expiry — never a bare decode. `email_verified` must be `true`. If the address already has a password account, the identity is linked rather than duplicated.
+- **Demo sign-in** is a real session on a real account, not a bypass, so it inherits every control above rather than sidestepping them. Three properties bound what it can reach: the account is always a **recruiter**, never the admin that the first registration on a fresh deployment would become; it holds **no password hash**, so the well-known address cannot be driven through the password form and `forgot-password` will not issue a reset for it; and **registration refuses its address**, answering exactly as a normal signup does, so the button can never be pointed at a stranger's workspace. If `DEMO_EMAIL` is ever aimed at an account that is not the demo one, the route returns 503 instead of handing out a session. *Verified: repeated demo logins reuse one workspace, and a signup on the demo address returns the usual 202 while creating nothing.*
+- **Google Sign-In** verifies the ID token against Google's signing keys (`google-auth-library`) — signature, issuer, audience, expiry — never a bare decode. `email_verified` must be `true`. If the address already has a password account, the identity is linked rather than duplicated. Disabled by default: the route answers 404 before any of that runs, which keeps a switched-off feature honest rather than making it look like an outage.
 - **Production refuses to start** without `SESSION_SECRET` and `APP_URL`. A server that quietly generates its own secret looks healthy while every restart invalidates sessions.
 
 ### Multi-tenant isolation
@@ -336,9 +363,10 @@ NODE_ENV=production npm start
 
 `deploy/` holds a Caddyfile (automatic TLS), an nginx config, and a systemd unit with the sandboxing directives that matter — read-only root, `ReadWritePaths` limited to the two directories the app writes, no capabilities, `UMask=0077`.
 
-- **HTTPS.** Enforced whenever `NODE_ENV=production`. GET and HEAD are redirected with a 308; other methods get a 403 rather than a redirect, because redirecting a POST invites the client to replay the body over the insecure hop it just used. Behind a proxy the original scheme is only known from `X-Forwarded-Proto`, which is attacker-controlled unless `TRUST_PROXY` is set — so without it the check falls back to the raw socket and fails closed. HSTS, a tight CSP, `frame-ancestors 'none'`, and `Permissions-Policy` ship on every response.
+- **HTTPS.** Enforced whenever `NODE_ENV=production`. GET and HEAD are redirected with a 308; other methods get a 403 rather than a redirect, because redirecting a POST invites the client to replay the body over the insecure hop it just used. Behind a proxy the original scheme is only known from `X-Forwarded-Proto`, which is attacker-controlled unless `TRUST_PROXY` is set — so without it the check falls back to the raw socket and fails closed. HSTS, a tight CSP, `frame-ancestors 'none'`, and `Permissions-Policy` ship on every response. The CSP names `accounts.google.com` only while Google sign-in is enabled, so a deployment that does not use it carries no standing allowance to run third-party script, frame a third-party origin, or connect to one.
+- **`TRUST_PROXY` is normalised, and that matters more than it sounds.** Express reads *any* string it is handed as a list of proxy addresses — so `TRUST_PROXY=1`, the value every hosting dashboard invites you to type, compiled to the address `0.0.0.1`, matched no proxy, and trusted nothing, with no error to say so. The symptoms surface far from the cause: every client shares one rate-limit bucket keyed on the proxy's IP (one attacker's failures throttle everyone), the audit log records the proxy instead of the real client, and `req.secure` stays false — which makes HTTPS enforcement redirect in a loop. `config.ts` now maps `true`/`on`/`1` to one hop, a larger number to that many, `false`/unset to off, and anything else to an address list. *Verified against a live Express instance: `TRUST_PROXY=1` resolves the forwarded client IP with `req.secure === true`, where the raw string resolved neither.* Set it to the number of proxies actually in front of you — on most managed hosts that is `1`.
 - **Secret handling.** Every credential lives in `server/.env` — gitignored, mode 600, never tracked. Nothing secret reaches the browser: verified by building the bundle and grepping it for the Gemini key, the session secret, and the Google client ID (0 occurrences each). The Google client ID is fetched at runtime from `/api/health` rather than inlined, so rotating it needs no rebuild; it is public by design, and the client secret is never used by this flow and exists nowhere in the tree.
-- `/api/health` reports engine detail — which models are configured, whether AI is on — only to authenticated callers. Anonymous visitors get the Google client ID and upload limits and nothing else, because model configuration is free reconnaissance and of no use to someone who has not signed in.
+- `/api/health` reports engine detail — which models are configured, whether AI is on — only to authenticated callers. Anonymous visitors get the available sign-in methods and the upload limits and nothing else, because model configuration is free reconnaissance and of no use to someone who has not signed in. The Google client ID is part of that public answer only while Google sign-in is on; it is public by design when the button needs it, and withheld entirely when it does not.
 
 Two repeatable checks guard against regression:
 
@@ -376,7 +404,8 @@ Three detectors watch for what a single event cannot show:
 ## Known Limits
 
 - Rate-limit counters are in-process. Correct for one node; behind several instances they no longer add up — move the bucket map to Redis at that point.
-- Mail has no bundled provider. Without `MAIL_WEBHOOK_URL` links are printed to the server log, which is right for development and must be configured before real users exist.
+- Mail has no bundled provider. Without `MAIL_WEBHOOK_URL` links are printed to the server log, which is right for development and must be configured before real users exist. Until it is, the demo button is the only way a stranger can get in, because login is gated on a confirmed address.
+- The demo workspace is shared, not per-visitor. Roles and resumes one visitor adds are visible to the next, and nothing prunes it — so it accumulates until someone clears it, and it is the wrong place for anything real. A throwaway workspace per visitor would be a different `ensureDemoUser`, at the cost of an account per click to garbage-collect.
 - There is no second factor. That is the next thing to add.
 - Ownership is enforced by the store's signatures rather than by the type system. A `UserScopedId` branded type would make a missing check a compile error instead of a convention — worth doing if this grows more endpoints.
 - Detector and rate-limit state is in-process. On more than one node each instance enforces its own slice of every budget — move the counters to Redis before scaling out, or the effective limits multiply by the node count.
