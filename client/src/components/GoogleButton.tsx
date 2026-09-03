@@ -7,6 +7,11 @@ import { useEffect, useRef, useState } from 'react';
  * client id never reaches out to Google at all. The component renders nothing
  * unless a client id is configured — no dead button, no broken promise to the
  * user.
+ *
+ * Google sign-in is currently switched off server-side, so /api/health reports
+ * no client id and this renders nothing. The component is kept intact because
+ * turning the feature back on is a configuration change (GOOGLE_LOGIN=on),
+ * not a code change.
  */
 
 interface GoogleAccountsId {
@@ -107,19 +112,13 @@ export default function GoogleButton({ clientId, onCredential, mode, disabled }:
     );
   }
 
+  // Just the button. The "or with email" rule belongs to the page, which may
+  // be stacking this above other sign-in options and needs one divider, not one
+  // per option.
   return (
-    <div className="space-y-md">
-      <div
-        ref={host}
-        className={`flex justify-center min-h-[44px] ${disabled ? 'opacity-50 pointer-events-none' : ''}`}
-      />
-      <div className="flex items-center gap-sm">
-        <span className="h-px flex-1 bg-outline-variant" />
-        <span className="font-body text-label-md uppercase text-on-surface-variant">
-          or with email
-        </span>
-        <span className="h-px flex-1 bg-outline-variant" />
-      </div>
-    </div>
+    <div
+      ref={host}
+      className={`flex justify-center min-h-[44px] ${disabled ? 'opacity-50 pointer-events-none' : ''}`}
+    />
   );
 }

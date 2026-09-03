@@ -20,9 +20,10 @@ const FEATURES = [
 ];
 
 export default function Auth() {
-  const { login, register, loginWithGoogle } = useAuth();
+  const { login, register, loginWithGoogle, loginAsDemo } = useAuth();
   const [params] = useSearchParams();
   const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [demoEnabled, setDemoEnabled] = useState(false);
   // The landing page's "Get Started" links deep-link straight to registration.
   const [mode, setMode] = useState<Mode>(
     params.get('mode') === 'register' ? 'register' : 'login',
@@ -79,12 +80,18 @@ export default function Auth() {
     setUnverified(null);
   };
 
-  // Ask the server whether Google sign-in is configured for this deployment.
+  // Ask the server which sign-in methods this deployment offers. Google is off
+  // unless an operator turns it back on, so in practice this decides whether
+  // the demo button appears.
   useEffect(() => {
     let cancelled = false;
     api
       .health()
-      .then((h) => !cancelled && setGoogleClientId(h.google?.enabled ? h.google.clientId : null))
+      .then((h) => {
+        if (cancelled) return;
+        setGoogleClientId(h.google?.enabled ? h.google.clientId : null);
+        setDemoEnabled(Boolean(h.demo?.enabled));
+      })
       .catch(() => {
         /* Health is optional here — the email form still works without it. */
       });
@@ -98,6 +105,21 @@ export default function Auth() {
       await loginWithGoogle(credential);
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : 'Google sign-in failed. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDemo() {
+    setBusy(true);
+    setFormError(null);
+    setNotice(null);
+    try {
+      await loginAsDemo();
+    } catch (err) {
+      setFormError(
+        err instanceof ApiError ? err.message : 'Could not open the demo. Try again.',
+      );
     } finally {
       setBusy(false);
     }
@@ -348,13 +370,46 @@ export default function Auth() {
               </div>
             )}
 
-            {mode !== 'forgot' && (
-              <GoogleButton
-                clientId={googleClientId}
-                onCredential={onGoogleCredential}
-                mode={mode === 'register' ? 'register' : 'login'}
-                disabled={busy}
-              />
+            {/* Alternatives to the email form. The divider lives here rather
+                than inside either option, so stacking both still shows one. */}
+            {mode !== 'forgot' && (googleClientId || demoEnabled) && (
+              <div className="space-y-md">
+                <GoogleButton
+                  clientId={googleClientId}
+                  onCredential={onGoogleCredential}
+                  mode={mode === 'register' ? 'register' : 'login'}
+                  disabled={busy}
+                />
+
+                {demoEnabled && (
+                  <div className="space-y-xs">
+                    <button
+                      type="button"
+                      onClick={onDemo}
+                      disabled={busy}
+                      className="btn-ghost w-full py-md text-body-md"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                        rocket_launch
+                      </span>
+                      Explore the demo workspace
+                    </button>
+                    {/* Everyone shares this account, so say so before they
+                        upload a real candidate's resume to it. */}
+                    <p className="font-body text-body-sm text-on-surface-variant text-center">
+                      Shared and public — no sign-up, and no real resumes please.
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-sm">
+                  <span className="h-px flex-1 bg-outline-variant" />
+                  <span className="font-body text-label-md uppercase text-on-surface-variant">
+                    or with email
+                  </span>
+                  <span className="h-px flex-1 bg-outline-variant" />
+                </div>
+              </div>
             )}
 
             <form onSubmit={onSubmit} className="space-y-md mt-md" noValidate>

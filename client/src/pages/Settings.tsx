@@ -266,7 +266,13 @@ function SecuritySection() {
     <section className="panel p-lg">
       <h2 className="font-heading text-headline-md mb-md">Security</h2>
 
-      {user?.provider === 'google' ? (
+      {user?.provider === 'demo' ? (
+        <p className="font-body text-body-sm text-on-surface-variant">
+          This is the shared demo workspace. It has no password to change, and
+          everything in it is visible to anyone else exploring the demo — sign
+          up for your own workspace before uploading anything real.
+        </p>
+      ) : user?.provider === 'google' ? (
         <p className="font-body text-body-sm text-on-surface-variant">
           This account signs in with Google, so there is no password here to change.
           Manage it from your Google account settings.

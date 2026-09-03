@@ -24,7 +24,7 @@ import { emailFingerprint, log, maskEmail } from './logger.js';
 
 export type AuthEvent =
   | 'login.success' | 'login.failure' | 'login.locked' | 'login.unverified'
-  | 'login.google' | 'register.new' | 'register.duplicate'
+  | 'login.google' | 'login.demo' | 'register.new' | 'register.duplicate'
   | 'verify.success' | 'verify.failure'
   | 'reset.requested' | 'reset.completed' | 'reset.failure'
   | 'password.changed'
