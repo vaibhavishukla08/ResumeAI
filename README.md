@@ -33,7 +33,7 @@ The interface is rooted in the Stitch project *Resume Insight Analyzer* — its 
 
 ### **[resumeai-sa5g.onrender.com](https://resumeai-sa5g.onrender.com)**
 
-Click **Explore the demo workspace** on the sign-in page. No account, no address to confirm, nothing to install — you land in a workspace that already has the starter roles, so you can drop a resume in and read a score straight away.
+Open the link and click **Explore the demo workspace**. No account, no address to confirm, nothing to install — you land in a workspace that already has the starter roles, so you can drop a resume in and read a score straight away.
 
 Four things worth knowing before you judge it:
 
@@ -42,7 +42,7 @@ Four things worth knowing before you judge it:
 - **It runs the local engine.** No Gemini key is configured there, so every score you see is the deterministic path, reproducible from the code in this repo rather than from a model that may answer differently tomorrow.
 - **Nothing you upload is permanent.** The datastore is a JSON file on the container's own filesystem, so unless a persistent disk is attached it resets whenever the instance restarts or redeploys.
 
-Registering your own account works on the live instance too, but no mail provider is configured there, so the confirmation link goes to a server log you cannot reach. The demo button is the way in.
+Account registration exists, but completing it needs the emailed confirmation link, and no mail provider is configured on the live instance. The demo button is the way in there.
 
 On a deployment of your own the button is on by default: `DEMO_LOGIN=false` removes it and the route together, and `DEMO_EMAIL` renames the account (default `demo@resumeai.local`, which never receives mail).
 
@@ -54,7 +54,7 @@ On a deployment of your own the button is on by default: `DEMO_LOGIN=false` remo
 npm run install:all && npm run dev
 ```
 
-Then open **http://localhost:5173**. The demo button works here as well, and so does registering: with no mail provider configured the confirmation link is printed to the server console, so copy it from there to finish a local signup. The first account registered becomes the admin.
+Then open **http://localhost:5173** and click **Explore the demo workspace**. To create a real account locally instead, the confirmation link is printed to the server console when no mail provider is configured — copy it from there. The first account created becomes the admin.
 
 The API runs on `5174`; Vite proxies `/api` to it, so there is no CORS step.
 
@@ -68,7 +68,7 @@ The central design decision is that three different numbers mean three different
 
 | Score | Nature | What it measures |
 |---|---|---|
-| **Similarity** | Objective | Cosine distance between the resume and the job description. Pure geometry — language overlap and nothing else. |
+| **Similarity** | Objective | How close the resume is to the job description. With a Gemini key this is the cosine between *embeddings* of the two documents — meaning, not wording. Without one it is a cosine over TF-IDF vectors, which compares vocabulary. |
 | **Confidence** | Subjective | How much to trust the match: were skills shown in context or only listed, does seniority fit, did the document parse cleanly. |
 | **ATS score** | Hygiene | How well the document survives a conventional keyword-and-format ATS pass — contact details, structure, length, machine readability, quantified impact. |
 
@@ -77,7 +77,48 @@ The disagreements are the signal:
 - **High similarity + low confidence** → a keyword-stuffed resume.
 - **High ATS + low similarity** → a well-built resume for the wrong role.
 
-**Verified example** (bundled fixtures): an ML engineer scored against a *Senior Frontend Engineer* role earns ATS 58 (a clean, well-structured document) but overall 20 with 0/10 required skills. Against the *AI/ML Engineer* role the same resume scores 81. Nothing about the resume changed — only what it was measured against.
+**Verified example** (local engine): an ML engineer scored against a *Senior Frontend Engineer* role earns ATS 58 (a clean, well-structured document) but overall 20 with 0/10 required skills. Against the *AI/ML Engineer* role the same resume scores 81. Nothing about the resume changed — only what it was measured against.
+
+### How the ranking number is built
+
+`overall` is what candidates are sorted by. It is a weighted blend, capped at 100, and skills dominate deliberately — that is what a recruiter actually filters on:
+
+| Component | Weight |
+|---|---|
+| Required-skill coverage | 55 |
+| Similarity to the job description | 20 |
+| Experience fit against the role's minimum | 12 |
+| ATS score | 13 |
+
+### How similarity is computed
+
+Two engines, one interface. Which one ran is reported per candidate as `analysis.similarityEngine`.
+
+**With `GEMINI_API_KEY` set — semantic.** The resume and the job description (title, description, and required-skill labels) are each sent to `gemini-embedding-001` with `taskType: SEMANTIC_SIMILARITY`, and the cosine between the two 3072-dimension vectors becomes the similarity score. This is what lets *"led a squad of six"* match *"team leadership"* with no shared vocabulary at all.
+
+**Without a key, or if an embedding call fails — lexical.** The similarity falls back to `cosineSimilarity()`, a TF-IDF cosine computed locally over the batch, where the batch supplies the IDF term so words common to every resume carry little weight. Nothing else about scoring changes, and the returned numbers are identical to what the app produced before embeddings existed. A null from the embedding path is treated as a normal outcome, not an error.
+
+**The two cosines are not the same number,** which is the part worth stating. TF-IDF over a resume and a job description lands around 0.1–0.45. A general-purpose embedding space has a much higher floor — everything written in professional English is somewhat alike — so the whole useful signal sits in a narrow band near the top. Measured on this model at realistic document length:
+
+| ML engineer resume vs | raw cosine |
+|---|---|
+| *AI/ML Engineer* role | 0.837 |
+| *Senior Frontend Engineer* role | 0.762 |
+| *Registered Nurse* role | 0.732 |
+
+Fed straight into the scale the rest of the pipeline was tuned for, all three would score above 1.0 — every candidate a perfect match, and the ranking destroyed. So the embedding cosine is stretched from that band back across 0–1 before anything downstream sees it. The bounds are a property of the model rather than of this app, and are overridable without a code change.
+
+Scored end to end, the same resume against three roles:
+
+| Role | Lexical | Semantic |
+|---|---|---|
+| *AI/ML Engineer* | similarity 0.58, overall 63 | similarity 0.90, overall **69** |
+| *Senior Frontend Engineer* | similarity 0.07, overall 21 | similarity 0.29, overall 25 |
+| *Registered Nurse* | similarity 0.00, overall 19 | similarity 0.13, overall 22 |
+
+The ordering holds under both engines. The semantic one separates them more widely and gives partial credit for an adjacent role, which the lexical one cannot see.
+
+**Cost control.** Embeddings are cached in-process by a digest of the text, so a batch of sixty resumes embeds the job description once rather than sixty times, and re-scoring a role re-uses vectors for text that has not changed. The cache is bounded and evicts the least recently used entry.
 
 ---
 
@@ -120,11 +161,24 @@ New accounts are seeded with six starter roles spanning nursing, finance, market
 - Evidence snippets: hover a matched skill to see the sentence it came from
 - Experience derived from merged date ranges, so concurrent roles are not double-counted
 - Six-dimension ATS breakdown, each dimension individually explained
+- Semantic matching against the job description through Gemini embeddings when a key is configured, with the local TF-IDF cosine as the fallback
+
+### Dashboard
+- Four pool statistics for the selected role: candidate count, average score, strong matches, average skill coverage
+- Top candidates, ranked, with inline status changes
+- Talent gaps across the pool, and the role's own requirements alongside them
+- Engine badge showing whether analysis is running on the local engine or Gemini
+- Upload happens here, with real per-batch progress
 
 ### Screening
 - Filter by overall / ATS / confidence / coverage thresholds, experience band, required and excluded skills, education level, status, and extraction health
 - Sort by any metric
 - Bulk shortlist / reject, CSV export
+
+### Reports and export
+- Per-candidate PDF report: paginated A4, branded, with a header rule and footer on every page so a detached sheet is still identifiable. jsPDF is dynamically imported, so the library is fetched on the export click rather than shipped in the initial bundle
+- CSV export of the filtered candidate list, and of the comparison matrix
+- Every exported cell is escaped against spreadsheet formula injection — see [Input validation](#input-validation)
 
 ### Comparison
 - Skill matrix: candidates as columns, required skills as rows, mention counts per cell
@@ -153,8 +207,8 @@ New accounts are seeded with six starter roles spanning nursing, finance, market
 - Mammoth
 
 **AI**
-- Deterministic local analysis engine
-- Optional Google Gemini
+- Deterministic local analysis engine (TF-IDF cosine, skill taxonomy, ATS heuristics)
+- Optional Google Gemini — embeddings for semantic matching, structured extraction, written recommendations, vision OCR
 
 **Authentication & Security**
 - bcrypt
@@ -171,7 +225,12 @@ New accounts are seeded with six starter roles spanning nursing, finance, market
 ## Optional Integrations
 
 ### Gemini
-Everything above works without a key. Adding one upgrades three things: LLM structured extraction, written recommendations with interview questions, and vision-based OCR for scans.
+Everything above works without a key. Adding one upgrades four things:
+
+- **Semantic candidate matching.** Resumes and job descriptions are embedded with `gemini-embedding-001` and compared by cosine similarity, replacing the local TF-IDF score in the ranking. See [How similarity is computed](#how-similarity-is-computed).
+- **Structured extraction.** An LLM pass over the resume refines name, title, dates, roles, contact details and achievements, merged over the deterministic parse rather than replacing it — local values stay as the floor, so a partial answer cannot erase them.
+- **Written recommendations**, including suggested interview questions, shown on the candidate analysis page.
+- **Vision-based OCR** for scans and photos with no text layer.
 
 ```bash
 cp server/.env.example server/.env
@@ -180,10 +239,9 @@ cp server/.env.example server/.env
 
 Restart the server. The dashboard badge flips from **Local engine** to **Gemini engine**.
 
-Every LLM response is schema-constrained and validated before use; a malformed or missing response falls back to the local result rather than failing the batch. Model ids are env-overridable (`GEMINI_EXTRACT_MODEL`, `GEMINI_REASON_MODEL`, `GEMINI_EMBED_MODEL`) because model names move faster than code.
+Every LLM response is schema-constrained and validated before use; a malformed or missing response falls back to the local result rather than failing the batch. The same rule governs embeddings: a failed or unavailable embedding call returns null and the lexical similarity is used, so a Gemini outage degrades the scores rather than breaking the upload. Model ids are env-overridable (`GEMINI_EXTRACT_MODEL`, `GEMINI_REASON_MODEL`, `GEMINI_EMBED_MODEL`) because model names move faster than code.
 
-### Google Sign-In — not used
-Sign-in is the demo workspace plus email and password. The Google flow is still in the tree (`google-auth-library`, the `POST /api/auth/google` route, the button component) behind `GOOGLE_LOGIN=on`, because deleting a working, verified OAuth path in order to re-add it later is churn. With the flag down it is inert: the route answers 404, the client ID is withheld from `/api/health` so the browser never loads Google's script, and the CSP carries no allowance for `accounts.google.com`. One predicate governs all four, so there is no state where one is on and another is off.
+The key is read on the server and never sent to the browser. The dashboard learns only whether AI is on, never the credential.
 
 ---
 
@@ -205,9 +263,11 @@ server/                          (Express + TypeScript, run with tsx)
   src/lib/mailer.ts   Verification and reset mail, logs when unconfigured
   src/lib/skills.ts   Taxonomy, alias folding, text scanning
   src/lib/parse.ts    Structured extraction (name, dates, roles, education)
-  src/lib/score.ts    Similarity, confidence, ATS breakdown, insights
+  src/lib/score.ts    Similarity (semantic or lexical), confidence, ATS
+                       breakdown, ranking, insights
   src/lib/extract.ts  PDF / OCR / DOCX text extraction
-  src/lib/gemini.ts   Optional LLM layer — additive, never required
+  src/lib/gemini.ts   Optional LLM layer — embeddings, extraction,
+                       recommendations. Additive, never required.
   src/lib/store.ts    JSON persistence, user-scoped
 
 client/                          (React 18 + Vite + TypeScript)
@@ -221,7 +281,9 @@ client/                          (React 18 + Vite + TypeScript)
 Typecheck both sides with `npm run typecheck`.
 
 ### Swapping in Postgres + pgvector
-`server/src/lib/store.ts` is the only file that touches persistence, and its exported surface (`findRole`, `listCandidates`, `corpusFor`, …) is the shape a Supabase adapter would expose. `cosineSimilarity` in `server/src/lib/score.ts` takes the same arguments a `pgvector <=>` query would, and `gemini.embed()` already returns real embedding vectors when a key is set. Moving to pgvector is a change to those two files.
+`server/src/lib/store.ts` is the only file that touches persistence, and its exported surface (`findRole`, `listCandidates`, `corpusFor`, …) is the shape a Supabase adapter would expose.
+
+The vector half is already real: `gemini.embed()` returns 3072-dimension embeddings and `gemini.cosine()` computes the distance a `pgvector <=>` query would. What is missing is *storage* — vectors live in a bounded in-process cache and are recomputed after a restart, because a JSON file is the wrong place to keep 3072 floats per candidate. Persisting them is the reason to move: with pgvector the embedding is written once at upload and every later comparison is a query rather than an API call.
 
 ---
 
@@ -266,7 +328,6 @@ Sessions are server-side and opaque. The credential is a 256-bit random value in
 - **No user enumeration.** Registering an address that already exists returns the same body and status as a fresh signup, and mails the real owner instead. `forgot-password` always answers identically. Login runs a dummy bcrypt compare when no account matches, so a miss costs the same as a wrong password — measured at 457 ms vs 463 ms, against roughly 1 ms vs 460 ms before.
 - **CSRF** uses a double-submit token. `SameSite=Lax` already blocks cross-site POSTs, but `/api/analyze` is `multipart/form-data` — a "simple" content type a cross-origin form can submit without a preflight — so the header check is what actually closes that path. Anonymous callers are issued a token so login itself is protected, and it rotates on sign-in to defeat session fixation.
 - **Demo sign-in** is a real session on a real account, not a bypass, so it inherits every control above rather than sidestepping them. Three properties bound what it can reach: the account is always a **recruiter**, never the admin that the first registration on a fresh deployment would become; it holds **no password hash**, so the well-known address cannot be driven through the password form and `forgot-password` will not issue a reset for it; and **registration refuses its address**, answering exactly as a normal signup does, so the button can never be pointed at a stranger's workspace. If `DEMO_EMAIL` is ever aimed at an account that is not the demo one, the route returns 503 rather than handing out a session. *Verified: repeated demo logins reuse one workspace, and a signup on the demo address returns the usual 202 while creating nothing.*
-- **Google sign-in is off, and off means off.** The verification path is intact — the ID token checked against Google's signing keys (`google-auth-library`) for signature, issuer, audience and expiry, never a bare decode, with `email_verified` required — but nothing reaches it without `GOOGLE_LOGIN=on` alongside a client ID. While the flag is down `POST /api/auth/google` answers 404 before any verification runs, the client ID is withheld from `/api/health`, and the CSP names no Google origin at all.
 - **Production refuses to start** without `SESSION_SECRET` and `APP_URL`. A server that quietly generates its own secret looks healthy while every restart invalidates sessions.
 
 ### Multi-tenant isolation
@@ -305,7 +366,7 @@ Uploads are verified by leading bytes, not by the extension the uploader claims.
 
 CSV formula injection deserves its own note because it is easy to miss: a resume is attacker-supplied data, and a candidate named `=cmd|'/c calc'!A1` turns the export into a delivery mechanism the moment a recruiter opens it in Excel. Cells beginning `=`, `+`, `-`, or `@` are now prefixed so spreadsheets treat them as literal text.
 
-Reports export as a paginated A4 PDF — branded, with a header rule and footer on every page so a detached sheet is still identifiable. jsPDF is dynamically imported, so the 390 KB library is fetched on the export click rather than shipped in the initial bundle (main chunk: 687 KB → 312 KB).
+Reports export as a paginated A4 PDF, built client-side. jsPDF is dynamically imported, so the 390 KB library is fetched on the export click rather than shipped in the initial bundle (main chunk: 687 KB → 312 KB).
 
 Rejections return 400 with the offending field name, never a 500 — an invalid input is the client's mistake, not a server fault.
 
@@ -356,9 +417,9 @@ NODE_ENV=production npm start
 
 `deploy/` holds a Caddyfile (automatic TLS), an nginx config, and a systemd unit with the sandboxing directives that matter — read-only root, `ReadWritePaths` limited to the two directories the app writes, no capabilities, `UMask=0077`.
 
-- **HTTPS.** Enforced whenever `NODE_ENV=production`. GET and HEAD are redirected with a 308; other methods get a 403 rather than a redirect, because redirecting a POST invites the client to replay the body over the insecure hop it just used. Behind a proxy the original scheme is only known from `X-Forwarded-Proto`, which is attacker-controlled unless `TRUST_PROXY` is set — so without it the check falls back to the raw socket and fails closed. HSTS, a tight CSP, `frame-ancestors 'none'`, and `Permissions-Policy` ship on every response The CSP names `accounts.google.com` only while Google sign-in is enabled, so a deployment that does not use it carries no standing allowance to run third-party script, frame a third-party origin, or connect to one.
+- **HTTPS.** Enforced whenever `NODE_ENV=production`. GET and HEAD are redirected with a 308; other methods get a 403 rather than a redirect, because redirecting a POST invites the client to replay the body over the insecure hop it just used. Behind a proxy the original scheme is only known from `X-Forwarded-Proto`, which is attacker-controlled unless `TRUST_PROXY` is set — so without it the check falls back to the raw socket and fails closed. HSTS, a tight CSP, `frame-ancestors 'none'`, and `Permissions-Policy` ship on every response. The CSP allows no third-party script at all: `script-src` is `'self'`, so nothing executes in the page that did not ship with the build.
 - **`TRUST_PROXY` is normalised, and that matters more than it sounds.** Express reads *any* string it is handed as a list of proxy addresses — so `TRUST_PROXY=1`, the value every hosting dashboard invites you to type, compiled to the address `0.0.0.1`, matched no proxy, and trusted nothing, with no error to say so. The symptoms surface far from the cause: every client shares one rate-limit bucket keyed on the proxy's IP (one attacker's failures throttle everyone), the audit log records the proxy instead of the real client, and `req.secure` stays false — which makes HTTPS enforcement redirect in a loop. `config.ts` now maps `true`/`on`/`1` to one hop, a larger number to that many, `false`/unset to off, and anything else to an address list. *Verified against a live Express instance: `TRUST_PROXY=1` resolves the forwarded client IP with `req.secure === true`, where the raw string resolved neither.* Set it to the number of proxies actually in front of you — on most managed hosts that is `1`.
-- **Secret handling.** Every credential lives in `server/.env` — gitignored, mode 600, never tracked. Nothing secret reaches the browser: verified by building the bundle and grepping it for the Gemini key, the session secret, and the Google client ID (0 occurrences each). The Google client ID is fetched at runtime from `/api/health` rather than inlined, so rotating it needs no rebuild; it is public by design, and the client secret is never used by this flow and exists nowhere in the tree.
+- **Secret handling.** Every credential lives in `server/.env` — gitignored, mode 600, never tracked. Nothing secret reaches the browser: verified by building the bundle and grepping it for the Gemini key and the session secret (0 occurrences each). The Gemini key is used only server-side: embeddings and LLM calls are made by the API, never by the browser, so rotating it needs no rebuild and no client change.
 - `/api/health` reports engine detail — which models are configured, whether AI is on — only to authenticated callers. Anonymous visitors get the available sign-in methods and the upload limits and nothing else, because model configuration is free reconnaissance and of no use to someone who has not signed in.
 
 Two repeatable checks guard against regression:
@@ -399,6 +460,8 @@ Three detectors watch for what a single event cannot show:
 - Rate-limit counters are in-process. Correct for one node; behind several instances they no longer add up — move the bucket map to Redis at that point.
 - Mail has no bundled provider. Without `MAIL_WEBHOOK_URL` links are printed to the server log, which is right for development and must be configured before real users exist. Until it is, the demo button is the only way a stranger can get in, because login is gated on a confirmed address.
 - The demo workspace is shared, not per-visitor. Roles and resumes one visitor adds are visible to the next, so it is the wrong place for anything real. Nothing prunes it either; on the hosted instance it happens to reset with the container's ephemeral disk, which is luck rather than design. A throwaway workspace per visitor would be a different `ensureDemoUser`, at the cost of an account per click to garbage-collect.
+- Embeddings are not persisted. They are cached in-process, so a restart re-embeds on the next analysis or re-score. Storing the vector with the candidate — the pgvector move above — is what removes that repeat cost.
+- The semantic band is calibrated against `gemini-embedding-001`. The bounds that stretch a raw cosine into a 0–1 score were measured on that model; a different embedding model has a different spread and would want re-measuring, which is why the bounds are configurable rather than baked in.
 - There is no second factor. That is the next thing to add.
 - Ownership is enforced by the store's signatures rather than by the type system. A `UserScopedId` branded type would make a missing check a compile error instead of a convention — worth doing if this grows more endpoints.
 - Detector and rate-limit state is in-process. On more than one node each instance enforces its own slice of every budget — move the counters to Redis before scaling out, or the effective limits multiply by the node count.
