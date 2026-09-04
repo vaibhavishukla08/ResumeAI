@@ -350,19 +350,79 @@ function buildInsights(
  * Full analysis for one resume against one role.
  * `corpus` is the other resumes in the batch, for IDF weighting.
  */
-export function analyze({ text, parsed, role, corpus = [] }: {
+/**
+ * The text a role is compared against, built in one place so the embedding
+ * path and the TF-IDF path are answering the same question about the same
+ * string. Called by both `analyze()` and the caller that embeds the role.
+ */
+export function jobDescriptionText(role: Role): string {
+  return [role.title, role.description, role.requiredSkills.map((s) => s.label).join(' ')]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * Embedding cosines and TF-IDF cosines are both called "cosine similarity" and
+ * are not remotely the same number. That is the trap in swapping one for the
+ * other, so it is worth stating plainly.
+ *
+ * TF-IDF over a resume and a job description lands around 0.1-0.45, which is
+ * why the score below multiplies it by 2.2 to reach a usable 0-1 range. A
+ * general-purpose embedding space has no such headroom: everything written in
+ * professional English is somewhat alike, so the floor is high and the entire
+ * useful signal sits in a narrow band near the top. Measured on this model
+ * (gemini-embedding-001, taskType SEMANTIC_SIMILARITY) at realistic document
+ * length:
+ *
+ *     ML engineer resume  vs  AI/ML Engineer role      0.837
+ *     ML engineer resume  vs  Frontend Engineer role   0.762
+ *     ML engineer resume  vs  Registered Nurse role    0.732
+ *
+ * Passing those through the existing x2.2 scores all three above 1.0 - every
+ * candidate a perfect match, and the ranking destroyed. So the band is
+ * stretched back across 0-1 before anything downstream sees it. The bounds are
+ * a property of the model, not of this app; override them if the model moves
+ * and the spread shifts.
+ */
+const SEMANTIC_FLOOR = Number(process.env.GEMINI_SIM_FLOOR) || 0.72;
+const SEMANTIC_CEIL = Number(process.env.GEMINI_SIM_CEIL) || 0.88;
+
+export function calibrateSemantic(cosine: number): number {
+  const span = SEMANTIC_CEIL - SEMANTIC_FLOOR;
+  if (span <= 0) return Math.max(0, Math.min(1, cosine));
+  return Math.max(0, Math.min(1, (cosine - SEMANTIC_FLOOR) / span));
+}
+
+export function analyze({ text, parsed, role, corpus = [], semanticCosine = null }: {
   text: string;
   parsed: ParsedResume;
   role: Role;
   corpus?: string[];
+  /**
+   * Raw cosine between the resume and job-description embeddings, from
+   * `gemini.semanticSimilarity()`. Null - no key, or the call failed - falls
+   * back to the local TF-IDF score, so this function still works offline and
+   * still returns exactly the numbers it always did.
+   */
+  semanticCosine?: number | null;
 }): Analysis {
   const detected = extractSkills(text);
   const skillMatch = matchSkills(role.requiredSkills, detected, role.weights);
 
-  const jdText = [role.title, role.description, role.requiredSkills.map((s) => s.label).join(' ')]
-    .filter(Boolean)
-    .join('\n');
-  const similarity = cosineSimilarity(text, jdText, corpus);
+  const jdText = jobDescriptionText(role);
+  const lexicalSimilarity = cosineSimilarity(text, jdText, corpus);
+
+  /*
+   * Everything downstream - the x2.2 display scaling, the confidence cap, the
+   * 20 points it contributes to `overall` - was tuned against the TF-IDF
+   * scale. Rather than re-tune all three for a second scale, the calibrated
+   * semantic score is mapped back onto that same scale, so one code path
+   * serves both engines and the local fallback behaves exactly as before.
+   */
+  const usingEmbeddings = semanticCosine !== null && Number.isFinite(semanticCosine);
+  const similarity = usingEmbeddings
+    ? calibrateSemantic(semanticCosine as number) / 2.2
+    : lexicalSimilarity;
 
   const breakdown = atsBreakdown(parsed, skillMatch, text);
   const parseability = breakdown.find((b) => b.key === 'Machine readability')!.score;
@@ -387,7 +447,11 @@ export function analyze({ text, parsed, role, corpus = [] }: {
   return {
     atsScore,
     similarity: Math.round(Math.min(1, similarity * 2.2) * 1000) / 1000,
-    rawSimilarity: Math.round(similarity * 1000) / 1000,
+    // The cosine actually used, reported on its own scale: an embedding cosine
+    // when semantic ranking is on, the TF-IDF one when it is not.
+    rawSimilarity:
+      Math.round((usingEmbeddings ? (semanticCosine as number) : similarity) * 1000) / 1000,
+    similarityEngine: usingEmbeddings ? 'embedding' : 'lexical',
     confidence: Math.round(confidence.value * 1000) / 1000,
     confidenceSignals: confidence.signals,
     overall,

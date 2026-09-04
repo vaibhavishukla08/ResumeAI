@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { extractText, SUPPORTED_EXTENSIONS, shutdownOcr } from './lib/extract.js';
 import { parseResume } from './lib/parse.js';
-import { analyze, cosineSimilarity } from './lib/score.js';
+import { analyze, cosineSimilarity, jobDescriptionText } from './lib/score.js';
 import { ALL_SKILLS, CATEGORIES } from './lib/skills.js';
 import { findTemplate, templatesBySector, ROLE_TEMPLATES } from './lib/role-templates.js';
 import * as store from './lib/store.js';
@@ -947,7 +947,24 @@ async function buildCandidate(opts: {
   // Skills the LLM found that the taxonomy scan missed get folded into the
   // text used for detection, so both paths feed one canonical skill list.
   const augmentedText = llmSkills.length ? `${text}\n\nSKILLS: ${llmSkills.join(', ')}` : text;
-  const analysis = analyze({ text: augmentedText, parsed, role, corpus });
+
+  /*
+   * Semantic ranking. The resume and the job description are embedded and
+   * compared in vector space, which catches the match that shared vocabulary
+   * misses - "led a squad of six" against "team leadership". Awaited here, at
+   * the one boundary that is already async and already shared by upload and
+   * re-score, so `analyze()` stays synchronous and deterministic.
+   *
+   * Null is the normal answer, not an error: no API key, or a call that
+   * failed. `analyze()` falls back to the local TF-IDF cosine, which is why
+   * this whole path stays optional.
+   */
+  const semanticCosine = await gemini.semanticSimilarity(
+    augmentedText,
+    jobDescriptionText(role),
+  );
+
+  const analysis = analyze({ text: augmentedText, parsed, role, corpus, semanticCosine });
 
   const recommendation = gemini.geminiEnabled()
     ? await gemini.recommend({ role, parsed, analysis })

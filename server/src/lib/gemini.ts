@@ -13,6 +13,8 @@
  * Model ids are env-configurable because model names move faster than code.
  */
 
+import crypto from 'node:crypto';
+
 import type { Analysis, ParsedResume, Recommendation, Role } from '../../../shared/types.js';
 
 interface GeminiResponse {
@@ -335,6 +337,63 @@ export async function embed(text: string): Promise<number[] | null> {
     console.warn('[gemini] embedding failed:', (err as Error).message);
     return null;
   }
+}
+
+/**
+ * Embedding cache, keyed by a digest of the text.
+ *
+ * A batch scores every resume against one job description, so without this the
+ * JD would be re-embedded once per file — sixty identical paid calls for one
+ * upload. Re-scoring a role repeats the same question about text that has not
+ * changed, and gets answered from here too. Bounded and insertion-ordered, so
+ * the oldest entry is evicted first; vectors are 3072 floats, and an unbounded
+ * map of them is a slow memory leak rather than a cache.
+ */
+const embedCache = new Map<string, number[]>();
+const EMBED_CACHE_MAX = 500;
+
+export async function embedCached(text: string): Promise<number[] | null> {
+  if (!geminiEnabled()) return null;
+
+  const key = crypto.createHash('sha256').update(text.slice(0, 20000)).digest('hex');
+  const hit = embedCache.get(key);
+  if (hit) {
+    // Re-insert so recency, not insertion order, decides what is evicted.
+    embedCache.delete(key);
+    embedCache.set(key, hit);
+    return hit;
+  }
+
+  const vector = await embed(text);
+  if (!vector) return null;
+
+  embedCache.set(key, vector);
+  if (embedCache.size > EMBED_CACHE_MAX) {
+    const oldest = embedCache.keys().next();
+    if (!oldest.done) embedCache.delete(oldest.value);
+  }
+  return vector;
+}
+
+/**
+ * Semantic similarity between a resume and a job description, as a raw cosine
+ * in embedding space. Null whenever the answer would be a guess — no key, or a
+ * failed call — which is the signal for the caller to use the local TF-IDF
+ * score instead. Callers must calibrate this number before comparing it to the
+ * lexical one; see `calibrateSemantic` in score.ts for why.
+ */
+export async function semanticSimilarity(
+  resumeText: string,
+  jobText: string,
+): Promise<number | null> {
+  if (!geminiEnabled()) return null;
+  if (!resumeText.trim() || !jobText.trim()) return null;
+
+  const [resumeVector, jobVector] = await Promise.all([
+    embedCached(resumeText),
+    embedCached(jobText),
+  ]);
+  return cosine(resumeVector, jobVector);
 }
 
 export function cosine(a: number[] | null, b: number[] | null): number | null {

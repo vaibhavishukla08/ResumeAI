@@ -187,7 +187,15 @@ export interface SkillSummary {
 export interface Analysis {
   atsScore: number;
   similarity: number;
+  /**
+   * The underlying cosine, on the scale of whichever engine produced it: an
+   * embedding cosine (~0.7-0.9) when `similarityEngine` is 'embedding', a
+   * TF-IDF cosine (~0.1-0.45) when it is 'lexical'. Compare it across
+   * candidates, not across engines.
+   */
   rawSimilarity: number;
+  /** Which similarity engine ranked this candidate. Absent on older records. */
+  similarityEngine?: 'embedding' | 'lexical';
   confidence: number;
   confidenceSignals: ConfidenceSignal[];
   overall: number;
